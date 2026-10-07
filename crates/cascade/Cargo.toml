@@ -1,0 +1,10 @@
+[package]
+name = "cascade"
+description = "Loads and simulates Unreal Engine 3 Cascade particle systems from Dishonored's cooked packages"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+glam.workspace = true
+upk = { path = "../upk" }

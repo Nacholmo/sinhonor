@@ -2,16 +2,17 @@
 //! usage: cargo run -p upk --example upk_dump -- <package.upk> <Object.Path | --list CLASS>
 use upk::{ObjRef, Package, Property, Value};
 
-fn show(props: &[Property], indent: usize) {
+fn show(pkg: &Package, props: &[Property], indent: usize) {
     for p in props {
         let pad = "  ".repeat(indent);
         match &p.value {
             Value::Struct { name, fields } => {
                 println!("{pad}{}[{}] ({name})", p.name, p.array_index);
-                show(fields, indent + 1);
+                show(pkg, fields, indent + 1);
             }
             Value::Array { count, raw } => println!("{pad}{}[{}] = array({count}, {} bytes)", p.name, p.array_index, raw.len()),
             Value::Raw { type_name, raw } => println!("{pad}{}[{}] = <{type_name}, {} bytes>", p.name, p.array_index, raw.len()),
+            Value::Object(i) if *i != 0 => println!("{pad}{}[{}] = {} ({i})", p.name, p.array_index, pkg.object_path(ObjRef::from_index(*i))),
             v => println!("{pad}{}[{}] = {v:?}", p.name, p.array_index),
         }
     }
@@ -31,5 +32,5 @@ fn main() {
     let class = pkg.export_class_name(i);
     println!("{} : {class}", pkg.object_path(ObjRef::Export(i)));
     let props = if class == "ScriptStruct" { pkg.struct_defaults(i) } else { pkg.properties(i) };
-    show(&props.expect("properties"), 1);
+    show(&pkg, &props.expect("properties"), 1);
 }

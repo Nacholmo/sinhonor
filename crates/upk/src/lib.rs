@@ -8,6 +8,7 @@
 
 mod props;
 mod reader;
+pub mod texture;
 
 pub use props::{lookup, Property, Value};
 
@@ -223,6 +224,12 @@ impl Package {
 
     /// Decodes the tagged properties of a plain (non-class) exported object.
     pub fn properties(&self, i: usize) -> Result<Vec<Property>> {
+        self.properties_and_tail(i).map(|(p, _)| p)
+    }
+
+    /// Like [`Package::properties`], plus the offset (within the export's data) where the
+    /// native serialized data following the property stream begins.
+    pub fn properties_and_tail(&self, i: usize) -> Result<(Vec<Property>, usize)> {
         let data = self.export_data(i);
         // Plain UObjects start with their NetIndex; components and templates may carry extra
         // fields first. Find the first offset where a well-formed tag stream begins.
@@ -234,11 +241,22 @@ impl Package {
             r.seek(start);
             if let Ok(props) = props::read_tagged(&mut r, self) {
                 if !props.is_empty() || data.len() <= start + 8 {
-                    return Ok(props);
+                    return Ok((props, r.pos()));
                 }
             }
         }
         Err(Error::Unsupported(format!("no property stream in {}", self.object_path(ObjRef::Export(i)))))
+    }
+
+    /// Decodes an `ArrayProperty` payload whose elements are tagged structs.
+    pub fn struct_array(&self, count: i32, raw: &[u8]) -> Result<Vec<Vec<Property>>> {
+        let mut r = Reader::new(raw);
+        (0..count.max(0)).map(|_| props::read_tagged(&mut r, self)).collect()
+    }
+
+    /// Decodes an `ArrayProperty` payload of object references.
+    pub fn object_array(raw: &[u8]) -> Vec<ObjRef> {
+        raw.chunks_exact(4).map(|c| ObjRef::from_index(i32::from_le_bytes(c.try_into().unwrap()))).collect()
     }
 
     /// Default values of a `ScriptStruct` export. Cooked structs end with their defaults as a
