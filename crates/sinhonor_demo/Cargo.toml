@@ -1,0 +1,11 @@
+[package]
+name = "sinhonor_demo"
+description = "Bevy demo course for the Dishonored motion kit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bevy = "0.16"
+dis_data = { path = "../dis_data" }
+dis_motion = { path = "../dis_motion" }
