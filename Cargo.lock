@@ -1868,6 +1868,7 @@ name = "dis_data"
 version = "0.1.0"
 dependencies = [
  "upk",
+ "wwise",
 ]
 
 [[package]]
@@ -5452,6 +5453,25 @@ name = "wit-bindgen"
 version = "0.57.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
+
+[[package]]
+name = "ww2ogg"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a16960726d0260e04dabd2b0036fbdacecefec9d115dc4b953086c3809685a23"
+dependencies = [
+ "byteorder",
+ "lewton",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "wwise"
+version = "0.1.0"
+dependencies = [
+ "lewton",
+ "ww2ogg",
+]
 
 [[package]]
 name = "x11-dl"

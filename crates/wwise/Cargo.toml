@@ -1,0 +1,11 @@
+[package]
+name = "wwise"
+description = "Reads Dishonored's Wwise sound packages (AKPK, bank v65) and converts clips to Ogg"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ww2ogg = "0.1"
+lewton = "0.10"
+

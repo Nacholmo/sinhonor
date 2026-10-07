@@ -6,6 +6,7 @@
 //! See `NOTES.md` for where each value lives and how it was identified.
 
 pub mod ini;
+pub mod sounds;
 
 use ini::Ini;
 use std::path::{Path, PathBuf};
@@ -149,6 +150,8 @@ pub struct BlinkLevel {
 #[derive(Clone, Debug)]
 pub struct BlinkTuning {
     pub levels: Vec<BlinkLevel>,
+    /// Wwise events the Blink tweak references (warmup, blink, fizzle), from the first level.
+    pub sound_events: sounds::BlinkSoundEvents,
     pub target_test_extent: [f32; 3],
     pub close_collision_distance: f32,
     pub close_collision_offset_step: f32,
@@ -473,8 +476,21 @@ pub fn load(install: &Path, difficulty: Difficulty) -> Result<GameData, Error> {
         }
     };
     const BLINK: &str = "DishonoredGame.DishonoredActivePowerComponent_Blink";
+    let event_name = |field: &str| match lookup(&twk, &format!("m_Levels[0].{field}")) {
+        Some(Value::Object(i)) if *i != 0 => {
+            let path = game.object_path(ObjRef::from_index(*i));
+            path.rsplit('.').next().map(str::to_string)
+        }
+        _ => None,
+    };
+    let sound_events = sounds::BlinkSoundEvents {
+        warmup: event_name("m_pBlinkWarmupSoundEvent"),
+        blink: event_name("m_pBlinkSoundEvent"),
+        fizzle: event_name("m_pFizzleSoundEvent"),
+    };
     let blink = BlinkTuning {
         levels,
+        sound_events,
         target_test_extent: extent,
         close_collision_distance: cx.f("m_fCloseCollisionDistance", tw("m_fCloseCollisionDistance"), 200.0),
         close_collision_offset_step: cx.f("m_fCloseCollisionOffsetStep", tw("m_fCloseCollisionOffsetStep"), 20.0),
