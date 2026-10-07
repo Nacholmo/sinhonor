@@ -1,0 +1,9 @@
+[package]
+name = "upk"
+description = "Reader for Unreal Engine 3 packages (.upk), as shipped with Dishonored (v801/lic 30)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+lzokay-native.workspace = true
