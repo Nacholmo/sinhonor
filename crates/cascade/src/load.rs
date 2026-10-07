@@ -67,7 +67,6 @@ impl MaterialLoader {
         };
         let p = parent.to_ascii_lowercase();
         let blend = if p.contains("translu") || p.contains("watersplash") || p.contains("smoke") { Blend::Translucent } else { Blend::Additive };
-        let glow = p.contains("glow");
 
         let mut textures: HashMap<String, ObjRef> = HashMap::new();
         if let Some(Value::Array { count, raw }) = lookup(&props, "TextureParameterValues") {
@@ -79,22 +78,47 @@ impl MaterialLoader {
                 }
             }
         }
-        let mut tint = [1.0f32; 4];
+        // Vector parameters: `Color` tints (alpha = intensity or opacity), `G_GlowColor` multiplies it.
+        let mut color: Option<[f32; 4]> = None;
+        let mut glow_color: Option<[f32; 4]> = None;
         if let Some(Value::Array { count, raw }) = lookup(&props, "VectorParameterValues") {
             for e in pkg.struct_array(*count, raw).unwrap_or_default() {
                 let name = match lookup(&e, "ParameterName") {
                     Some(Value::Name(n)) => n.to_ascii_lowercase(),
                     _ => continue,
                 };
-                if name == "color" || name == "c_color" || (name == "g_glowcolor" && tint == [1.0; 4]) {
-                    if let Some(Value::Raw { raw, .. }) = e.iter().find(|q| q.name == "ParameterValue").map(|q| &q.value) {
-                        if raw.len() == 16 {
-                            let f: Vec<f32> = raw.chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect();
-                            tint = [f[0], f[1], f[2], f[3].clamp(0.0, 4.0)];
-                        }
-                    }
+                let Some(Value::Raw { raw, .. }) = e.iter().find(|q| q.name == "ParameterValue").map(|q| &q.value) else { continue };
+                if raw.len() != 16 {
+                    continue;
+                }
+                let f: Vec<f32> = raw.chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect();
+                match name.as_str() {
+                    "color" | "c_color" => color = Some([f[0], f[1], f[2], f[3]]),
+                    "g_glowcolor" => glow_color = Some([f[0], f[1], f[2], f[3]]),
+                    _ => {}
                 }
             }
+        }
+        let mut scalars: HashMap<String, f32> = HashMap::new();
+        if let Some(Value::Array { count, raw }) = lookup(&props, "ScalarParameterValues") {
+            for e in pkg.struct_array(*count, raw).unwrap_or_default() {
+                if let (Some(Value::Name(n)), Some(v)) = (lookup(&e, "ParameterName"), e.iter().find(|q| q.name == "ParameterValue").and_then(|q| q.value.as_f32())) {
+                    scalars.insert(n.to_ascii_lowercase(), v);
+                }
+            }
+        }
+        let c = color.unwrap_or([1.0; 4]);
+        let g = glow_color.unwrap_or([1.0; 4]);
+        let mut tint = [c[0] * g[0], c[1] * g[1], c[2] * g[2], c[3].clamp(0.0, 4.0)];
+        let glow = p.contains("glow");
+        if let Some(o) = scalars.get("opacity") {
+            tint[3] = *o;
+        }
+        // Glow materials shape a radial glow; the glow power sharpens it and the fog intensity
+        // scales its brightness (25 on the Blink glow, 1 on its vertical light).
+        let glow_power = scalars.get("g_glowpower").copied().unwrap_or(1.5).max(0.5);
+        if glow {
+            tint[3] *= scalars.get("f_fog_intensity").copied().unwrap_or(1.0).max(0.0);
         }
 
         let tex = |keys: &[&str]| -> Option<upk::texture::Rgba> {
@@ -106,8 +130,18 @@ impl MaterialLoader {
                 }
             })
         };
-        let diffuse = tex(&["diffuse", "d_"]);
-        let opacity = tex(&["opacity", "shape", "o_"]);
+        let mut diffuse = tex(&["diffuse", "d_"]);
+        let opacity = tex(&["opacity", "shape", "alpha", "o_", "a_"]);
+        // Single-channel masks stored in red: use them as grey, not as red colour.
+        if let Some(t) = diffuse.as_mut() {
+            let (r, gb) = t.pixels.chunks_exact(4).fold((0u64, 0u64), |(r, gb), p| (r + p[0] as u64, gb + p[1] as u64 + p[2] as u64));
+            if gb * 20 < r {
+                for p in t.pixels.chunks_exact_mut(4) {
+                    p[1] = p[0];
+                    p[2] = p[0];
+                }
+            }
+        }
         let size = 64u32;
         let (w, h) = diffuse.as_ref().or(opacity.as_ref()).map_or((size, size), |t| (t.width, t.height));
         let mut rgba = vec![0u8; (w * h * 4) as usize];
@@ -115,10 +149,9 @@ impl MaterialLoader {
             for x in 0..w {
                 let o = ((y * w + x) * 4) as usize;
                 let (u, v) = ((x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32);
-                let radial = {
-                    let d = ((u - 0.5).powi(2) + (v - 0.5).powi(2)).sqrt() * 2.0;
-                    (1.0 - d).clamp(0.0, 1.0).powf(1.5)
-                };
+                let d = ((u - 0.5).powi(2) + (v - 0.5).powi(2)).sqrt() * 2.0;
+                let radial = (1.0 - d).clamp(0.0, 1.0).powf(1.5);
+                let glow_shape = (1.0 - d).clamp(0.0, 1.0).powf(glow_power);
                 let sample = |t: &upk::texture::Rgba| {
                     let (tx, ty) = ((u * t.width as f32) as u32 % t.width, (v * t.height as f32) as u32 % t.height);
                     let i = ((ty * t.width + tx) * 4) as usize;
@@ -134,7 +167,7 @@ impl MaterialLoader {
                     (None, None) => radial,
                 };
                 // Glow materials shape a soft radial glow, modulated by their noise texture.
-                let coverage = if glow { radial * (0.35 + 0.65 * coverage) } else { coverage };
+                let coverage = if glow { glow_shape * (0.6 + 0.4 * coverage) } else { coverage };
                 rgba[o..o + 4].copy_from_slice(&[rgb[0], rgb[1], rgb[2], (coverage * 255.0) as u8]);
             }
         }
@@ -209,114 +242,146 @@ pub fn load_system(pkg: &Package, path: &str, materials: &MaterialLoader) -> Opt
     let ps = pkg.find_export(path)?;
     let props = pkg.properties(ps).ok()?;
     let mut sys = SystemDef { name: path.to_string(), warmup_time: lookup(&props, "WarmupTime").and_then(Value::as_f32).unwrap_or(0.0), ..Default::default() };
+    if let Some(Value::Array { raw, .. }) = lookup(&props, "LODDistances") {
+        sys.lod_distances = raw.chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect();
+    }
     let Some(Value::Array { raw, .. }) = lookup(&props, "Emitters") else { return Some(sys) };
     for em in Package::object_array(raw) {
         let ObjRef::Export(e) = em else { continue };
         let Ok(ep) = pkg.properties(e) else { continue };
         let Some(Value::Array { raw: lods, .. }) = lookup(&ep, "LODLevels") else { continue };
-        let Some(ObjRef::Export(lod0)) = Package::object_array(lods).first().copied() else { continue };
-        let Ok(lp) = pkg.properties(lod0) else { continue };
-        if lookup(&lp, "bEnabled").and_then(Value::as_bool) == Some(false) {
-            continue;
+        let levels: Vec<Option<EmitterDef>> = Package::object_array(lods)
+            .into_iter()
+            .filter_map(|l| match l {
+                ObjRef::Export(li) => Some(build_emitter(pkg, em, li, materials)),
+                _ => None,
+            })
+            .collect();
+        // Skip emitters that are disabled or empty at LOD 0, for every level, so indices line up.
+        match levels.first() {
+            Some(Some(_)) => {}
+            _ => continue,
         }
-        let mut def = EmitterDef { name: pkg.object_path(em), duration: 1.0, ..Default::default() };
-        let mut modules = Vec::new();
-        for k in ["RequiredModule", "SpawnModule", "TypeDataModule"] {
-            if let Some(Value::Object(i)) = lookup(&lp, k) {
-                modules.push(*i);
+        let lod0 = levels[0].clone().unwrap();
+        for (n, level) in levels.into_iter().enumerate() {
+            if sys.lods.len() <= n {
+                sys.lods.push(Vec::new());
             }
+            sys.lods[n].push(level.unwrap_or_else(|| lod0.clone()));
         }
-        if let Some(Value::Array { raw, .. }) = lookup(&lp, "Modules") {
-            modules.extend(raw.chunks_exact(4).map(|c| i32::from_le_bytes(c.try_into().unwrap())));
-        }
-        for m in modules {
-            let Some((mi, mp)) = obj_props(pkg, m) else { continue };
-            let class = pkg.export_class_name(mi);
-            let mp = merge(&materials.class_default(&class), &mp);
-            if lookup(&mp, "bEnabled").and_then(Value::as_bool) == Some(false) {
-                continue;
-            }
-            match class.as_str() {
-                "ParticleModuleRequired" => {
-                    if let Some(Value::Object(i)) = lookup(&mp, "Material") {
-                        if *i != 0 {
-                            def.material = materials.get(pkg, ObjRef::from_index(*i));
-                        }
-                    }
-                    def.local_space = lookup(&mp, "bUseLocalSpace").and_then(Value::as_bool).unwrap_or(false);
-                    def.kill_on_deactivate = lookup(&mp, "bKillOnDeactivate").and_then(Value::as_bool).unwrap_or(false);
-                    def.duration = lookup(&mp, "EmitterDuration").and_then(Value::as_f32).unwrap_or(1.0);
-                    def.loops = lookup(&mp, "EmitterLoops").and_then(Value::as_f32).unwrap_or(0.0) as u32;
-                    def.delay = lookup(&mp, "EmitterDelay").and_then(Value::as_f32).unwrap_or(0.0);
-                    if let Some(Value::Enum(a)) = lookup(&mp, "ScreenAlignment") {
-                        if a == "PSA_Velocity" {
-                            def.alignment = Some(Alignment::Velocity);
-                        }
-                    }
-                }
-                "ParticleModuleSpawn" => {
-                    def.spawn_rate = dist(&mp, "Rate", 1).unwrap_or_default();
-                    def.spawn_rate_scale = dist(&mp, "RateScale", 1);
-                    if let Some(Value::Array { count, raw }) = lookup(&mp, "BurstList") {
-                        for b in pkg.struct_array(*count, raw).unwrap_or_default() {
-                            let count = lookup(&b, "Count").and_then(Value::as_f32).unwrap_or(0.0) as u32;
-                            let low = lookup(&b, "CountLow").and_then(Value::as_f32).filter(|v| *v >= 0.0).map(|v| v as u32);
-                            let time = lookup(&b, "Time").and_then(Value::as_f32).unwrap_or(0.0);
-                            def.bursts.push(Burst { count, count_low: low, time });
-                        }
-                    }
-                }
-                "ParticleModuleLifetime" => def.lifetime = dist(&mp, "Lifetime", 1).unwrap_or_default(),
-                "ParticleModuleSize" => def.start_size = dist(&mp, "StartSize", 3).unwrap_or_default(),
-                "ParticleModuleSizeMultiplyLife" => def.size_mult_life = dist(&mp, "LifeMultiplier", 3),
-                "ParticleModuleSizeMultiplyVelocity" => def.size_mult_velocity = dist(&mp, "VelocityMultiplier", 3),
-                "ParticleModuleColor" => {
-                    def.start_color = dist(&mp, "StartColor", 3);
-                    def.start_alpha = dist(&mp, "StartAlpha", 1);
-                }
-                "ParticleModuleColorOverLife" => {
-                    def.color_over_life = dist(&mp, "ColorOverLife", 3);
-                    def.alpha_over_life = dist(&mp, "AlphaOverLife", 1);
-                }
-                "ParticleModuleColorScaleOverLife" => {
-                    def.color_scale_over_life = dist(&mp, "ColorScaleOverLife", 3);
-                    def.alpha_scale_over_life = dist(&mp, "AlphaScaleOverLife", 1);
-                }
-                "ParticleModuleVelocity" => {
-                    def.start_velocity = dist(&mp, "StartVelocity", 3).unwrap_or_default();
-                    def.start_velocity_radial = dist(&mp, "StartVelocityRadial", 1).unwrap_or_default();
-                    def.velocity_world_space = lookup(&mp, "bInWorldSpace").and_then(Value::as_bool).unwrap_or(false);
-                }
-                "ParticleModuleVelocityOverLifetime" => def.velocity_over_life = dist(&mp, "VelOverLife", 3),
-                "ParticleModuleAcceleration" => def.acceleration = dist(&mp, "Acceleration", 3).unwrap_or_default(),
-                "ParticleModuleLocation" => def.start_location = dist(&mp, "StartLocation", 3).unwrap_or_default(),
-                "ParticleModuleLocationPrimitiveCylinder" => {
-                    def.cylinder = Some(Cylinder {
-                        radius: dist(&mp, "StartRadius", 1).unwrap_or_default(),
-                        height: dist(&mp, "StartHeight", 1).unwrap_or_default(),
-                        surface_only: lookup(&mp, "SurfaceOnly").and_then(Value::as_bool).unwrap_or(false),
-                        velocity: lookup(&mp, "Velocity").and_then(Value::as_bool).unwrap_or(false),
-                        velocity_scale: dist(&mp, "VelocityScale", 1).unwrap_or_default(),
-                    })
-                }
-                "ParticleModuleRotation" => def.start_rotation = dist(&mp, "StartRotation", 1).unwrap_or_default(),
-                "ParticleModuleRotationRate" => def.rotation_rate = dist(&mp, "StartRotationRate", 1).unwrap_or_default(),
-                "ParticleModuleRotationRateMultiplyLife" => def.rotation_rate_mult_life = dist(&mp, "LifeMultiplier", 1),
-                "ParticleModuleOrientationAxisLock" => {
-                    if let Some(Value::Enum(a)) = lookup(&mp, "LockAxisFlags") {
-                        if let Some(ax) = axis(a) {
-                            def.alignment = Some(Alignment::Axis(ax));
-                        }
-                    }
-                }
-                "ParticleModuleTypeDataMesh" => def.is_mesh = true,
-                _ => {}
-            }
-        }
-        if def.lifetime.is_empty() {
-            continue;
-        }
-        sys.emitters.push(def);
     }
+    // Every level needs every emitter; pad short levels with LOD 0's definition.
+    let count = sys.lods.first().map_or(0, Vec::len);
+    let base = sys.lods.first().cloned().unwrap_or_default();
+    for l in sys.lods.iter_mut() {
+        while l.len() < count {
+            l.push(base[l.len()].clone());
+        }
+    }
+    sys.emitters = base;
     Some(sys)
 }
+
+/// Builds one emitter at one LOD level, or `None` if that level is disabled or empty.
+fn build_emitter(pkg: &Package, em: ObjRef, lod: usize, materials: &MaterialLoader) -> Option<EmitterDef> {
+    let lp = pkg.properties(lod).ok()?;
+    if lookup(&lp, "bEnabled").and_then(Value::as_bool) == Some(false) {
+        return None;
+    }
+    let mut def = EmitterDef { name: pkg.object_path(em), duration: 1.0, ..Default::default() };
+    let mut modules = Vec::new();
+    for k in ["RequiredModule", "SpawnModule", "TypeDataModule"] {
+        if let Some(Value::Object(i)) = lookup(&lp, k) {
+            modules.push(*i);
+        }
+    }
+    if let Some(Value::Array { raw, .. }) = lookup(&lp, "Modules") {
+        modules.extend(raw.chunks_exact(4).map(|c| i32::from_le_bytes(c.try_into().unwrap())));
+    }
+    for m in modules {
+        let Some((mi, mp)) = obj_props(pkg, m) else { continue };
+        let class = pkg.export_class_name(mi);
+        let mp = merge(&materials.class_default(&class), &mp);
+        if lookup(&mp, "bEnabled").and_then(Value::as_bool) == Some(false) {
+            continue;
+        }
+        match class.as_str() {
+            "ParticleModuleRequired" => {
+                if let Some(Value::Object(i)) = lookup(&mp, "Material") {
+                    if *i != 0 {
+                        def.material = materials.get(pkg, ObjRef::from_index(*i));
+                    }
+                }
+                def.local_space = lookup(&mp, "bUseLocalSpace").and_then(Value::as_bool).unwrap_or(false);
+                def.kill_on_deactivate = lookup(&mp, "bKillOnDeactivate").and_then(Value::as_bool).unwrap_or(false);
+                def.duration = lookup(&mp, "EmitterDuration").and_then(Value::as_f32).unwrap_or(1.0);
+                def.loops = lookup(&mp, "EmitterLoops").and_then(Value::as_f32).unwrap_or(0.0) as u32;
+                def.delay = lookup(&mp, "EmitterDelay").and_then(Value::as_f32).unwrap_or(0.0);
+                if let Some(Value::Enum(a)) = lookup(&mp, "ScreenAlignment") {
+                    if a == "PSA_Velocity" {
+                        def.alignment = Some(Alignment::Velocity);
+                    }
+                }
+            }
+            "ParticleModuleSpawn" => {
+                def.spawn_rate = dist(&mp, "Rate", 1).unwrap_or_default();
+                def.spawn_rate_scale = dist(&mp, "RateScale", 1);
+                if let Some(Value::Array { count, raw }) = lookup(&mp, "BurstList") {
+                    for b in pkg.struct_array(*count, raw).unwrap_or_default() {
+                        let count = lookup(&b, "Count").and_then(Value::as_f32).unwrap_or(0.0) as u32;
+                        let low = lookup(&b, "CountLow").and_then(Value::as_f32).filter(|v| *v >= 0.0).map(|v| v as u32);
+                        let time = lookup(&b, "Time").and_then(Value::as_f32).unwrap_or(0.0);
+                        def.bursts.push(Burst { count, count_low: low, time });
+                    }
+                }
+            }
+            "ParticleModuleLifetime" => def.lifetime = dist(&mp, "Lifetime", 1).unwrap_or_default(),
+            "ParticleModuleSize" => def.start_size = dist(&mp, "StartSize", 3).unwrap_or_default(),
+            "ParticleModuleSizeMultiplyLife" => def.size_mult_life = dist(&mp, "LifeMultiplier", 3),
+            "ParticleModuleSizeMultiplyVelocity" => def.size_mult_velocity = dist(&mp, "VelocityMultiplier", 3),
+            "ParticleModuleColor" => {
+                def.start_color = dist(&mp, "StartColor", 3);
+                def.start_alpha = dist(&mp, "StartAlpha", 1);
+            }
+            "ParticleModuleColorOverLife" => {
+                def.color_over_life = dist(&mp, "ColorOverLife", 3);
+                def.alpha_over_life = dist(&mp, "AlphaOverLife", 1);
+            }
+            "ParticleModuleColorScaleOverLife" => {
+                def.color_scale_over_life = dist(&mp, "ColorScaleOverLife", 3);
+                def.alpha_scale_over_life = dist(&mp, "AlphaScaleOverLife", 1);
+            }
+            "ParticleModuleVelocity" => {
+                def.start_velocity = dist(&mp, "StartVelocity", 3).unwrap_or_default();
+                def.start_velocity_radial = dist(&mp, "StartVelocityRadial", 1).unwrap_or_default();
+                def.velocity_world_space = lookup(&mp, "bInWorldSpace").and_then(Value::as_bool).unwrap_or(false);
+            }
+            "ParticleModuleVelocityOverLifetime" => def.velocity_over_life = dist(&mp, "VelOverLife", 3),
+            "ParticleModuleAcceleration" => def.acceleration = dist(&mp, "Acceleration", 3).unwrap_or_default(),
+            "ParticleModuleLocation" => def.start_location = dist(&mp, "StartLocation", 3).unwrap_or_default(),
+            "ParticleModuleLocationPrimitiveCylinder" => {
+                def.cylinder = Some(Cylinder {
+                    radius: dist(&mp, "StartRadius", 1).unwrap_or_default(),
+                    height: dist(&mp, "StartHeight", 1).unwrap_or_default(),
+                    surface_only: lookup(&mp, "SurfaceOnly").and_then(Value::as_bool).unwrap_or(false),
+                    velocity: lookup(&mp, "Velocity").and_then(Value::as_bool).unwrap_or(false),
+                    velocity_scale: dist(&mp, "VelocityScale", 1).unwrap_or_default(),
+                })
+            }
+            "ParticleModuleRotation" => def.start_rotation = dist(&mp, "StartRotation", 1).unwrap_or_default(),
+            "ParticleModuleRotationRate" => def.rotation_rate = dist(&mp, "StartRotationRate", 1).unwrap_or_default(),
+            "ParticleModuleRotationRateMultiplyLife" => def.rotation_rate_mult_life = dist(&mp, "LifeMultiplier", 1),
+            "ParticleModuleOrientationAxisLock" => {
+                if let Some(Value::Enum(a)) = lookup(&mp, "LockAxisFlags") {
+                    if let Some(ax) = axis(a) {
+                        def.alignment = Some(Alignment::Axis(ax));
+                    }
+                }
+            }
+            "ParticleModuleTypeDataMesh" => def.is_mesh = true,
+            _ => {}
+        }
+    }
+    (!def.lifetime.is_empty()).then_some(def)
+}
+

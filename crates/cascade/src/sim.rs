@@ -51,12 +51,19 @@ pub struct Instance {
     emitters: Vec<EmitterState>,
     active: bool,
     rng: u64,
+    lod: usize,
 }
 
 impl Instance {
     pub fn new(def: Arc<SystemDef>, transform: Affine3A, seed: u64) -> Self {
+        Self::new_at_distance(def, transform, seed, 0.0)
+    }
+
+    /// Like [`Instance::new`], warming up at the LOD level for a camera `distance` away.
+    pub fn new_at_distance(def: Arc<SystemDef>, transform: Affine3A, seed: u64, distance: f32) -> Self {
         let emitters = def.emitters.iter().map(|e| EmitterState { bursts_fired: vec![false; e.bursts.len()], ..Default::default() }).collect();
-        let mut inst = Self { transform, emitters, active: true, rng: seed | 1, def };
+        let mut inst = Self { transform, emitters, active: true, rng: seed | 1, def, lod: 0 };
+        inst.set_camera_distance(distance);
         let mut t = inst.def.warmup_time;
         while t > 0.0 {
             inst.update(WARMUP_STEP.min(t));
@@ -65,10 +72,26 @@ impl Instance {
         inst
     }
 
+    /// Emitter definitions at the current LOD level.
+    pub fn emitter_defs(&self) -> &[EmitterDef] {
+        self.def.lods.get(self.lod).map_or(&self.def.emitters[..], Vec::as_slice)
+    }
+
+    /// Picks the LOD level for a camera at `distance` (the engine re-checks this periodically).
+    pub fn set_camera_distance(&mut self, distance: f32) {
+        self.lod = self.def.lod_for_distance(distance).min(self.def.lods.len().saturating_sub(1));
+    }
+
+    pub fn lod(&self) -> usize {
+        self.lod
+    }
+
     /// Stops spawning; emitters flagged kill-on-deactivate drop their particles.
     pub fn deactivate(&mut self) {
         self.active = false;
-        for (e, s) in self.def.emitters.iter().zip(&mut self.emitters) {
+        let def = self.def.clone();
+        let defs = def.lods.get(self.lod).unwrap_or(&def.emitters);
+        for (e, s) in defs.iter().zip(&mut self.emitters) {
             if e.kill_on_deactivate {
                 s.particles.clear();
             }
@@ -93,7 +116,8 @@ impl Instance {
 
     pub fn update(&mut self, dt: f32) {
         let def = self.def.clone();
-        for (k, e) in def.emitters.iter().enumerate() {
+        let defs = def.lods.get(self.lod).unwrap_or(&def.emitters);
+        for (k, e) in defs.iter().enumerate() {
             self.update_emitter(k, e, dt);
         }
     }
@@ -223,7 +247,7 @@ impl Instance {
 
     /// Visible particles, in world space.
     pub fn particles(&self) -> impl Iterator<Item = RenderParticle> + '_ {
-        self.def.emitters.iter().zip(&self.emitters).enumerate().flat_map(move |(k, (e, s))| {
+        self.emitter_defs().iter().zip(&self.emitters).enumerate().flat_map(move |(k, (e, s))| {
             s.particles.iter().map(move |p| {
                 let t = p.age / p.life;
                 let mut size = p.size0;
@@ -231,8 +255,8 @@ impl Instance {
                     size *= d.vector(t, Vec3::splat(p.r[2]));
                 }
                 if let Some(d) = &e.size_mult_velocity {
-                    let m = d.vector(t, Vec3::splat(p.r[3])) * p.vel.length();
-                    size *= m.max(Vec3::ONE);
+                    // Size = base size * speed * multiplier (per axis).
+                    size *= d.vector(t, Vec3::splat(p.r[3])) * p.vel.length();
                 }
                 let mut color = e.color_over_life.as_ref().map_or(p.color0, |d| d.vector(t, Vec3::splat(p.r[1])));
                 let mut alpha = e.alpha_over_life.as_ref().map_or(p.alpha0, |d| d.float(t, p.r[1]) * p.alpha0);
@@ -275,7 +299,7 @@ mod tests {
             start_size: constant(&[10.0, 10.0, 10.0]),
             ..Default::default()
         };
-        let def = Arc::new(SystemDef { emitters: vec![e], ..Default::default() });
+        let def = Arc::new(SystemDef { emitters: vec![e.clone()], lods: vec![vec![e]], ..Default::default() });
         let mut i = Instance::new(def, Affine3A::IDENTITY, 7);
         for _ in 0..10 {
             i.update(0.05);

@@ -178,6 +178,19 @@ pub struct Cylinder {
 #[derive(Clone, Debug, Default)]
 pub struct SystemDef {
     pub name: String,
+    /// Emitters at LOD 0 (the same as `lods[0]`).
     pub emitters: Vec<EmitterDef>,
+    /// Emitters per LOD level; indices line up across levels.
+    pub lods: Vec<Vec<EmitterDef>>,
+    /// Camera distance at which each LOD level starts (`LODDistances`).
+    pub lod_distances: Vec<f32>,
     pub warmup_time: f32,
+}
+
+impl SystemDef {
+    /// The LOD level the engine would use at `distance` from the camera.
+    pub fn lod_for_distance(&self, distance: f32) -> usize {
+        let n = self.lods.len().max(1);
+        self.lod_distances.iter().take(n).rposition(|&d| distance >= d).unwrap_or(0)
+    }
 }
