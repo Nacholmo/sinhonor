@@ -14,6 +14,7 @@ range and stepping) is read **at runtime from your own installed copy** of Disho
 |---|---|
 | `crates/upk` | Reader for Dishonored's UE3 packages: LZO chunk flattening, name/import/export tables, tagged properties |
 | `crates/dis_data` | Finds your install and loads the motion and Blink tuning from its packages and INI files |
+| `crates/wwise` | Reader for the Wwise sound packages (AKPK, bank v65); resolves events and converts clips to Ogg |
 | `crates/dis_motion` | Engine-agnostic movement and Blink logic. The host game supplies collision through a trait |
 | `crates/sinhonor_demo` | Bevy test level that shows the motion kit in action |
 
@@ -36,7 +37,13 @@ which of Corvo's attribute sets is used.
 | Q / E | lean |
 | Right mouse or F | hold to aim Blink, release to go |
 | 1 / 2 | Blink tier I / II |
+| M | mute game sounds |
 | R / F1 / Esc | reset / help / free cursor (again to quit) |
+
+Sound effects (footsteps per surface, landings, mantle, slide, Blink and more) are decoded at startup from
+your install's Wwise packages. Set `SINHONOR_LOG_SFX=1` to print each cue as it plays.
+
+On Linux the demo runs natively on Wayland, using a real pointer lock. Under X11 the cursor is confined and re-centred instead.
 
 `--autopilot <dir>` plays a scripted route (mantle, blink, ladder, rooftop blink, slide), prints the motion
 state at each checkpoint and writes screenshots to `<dir>`.

@@ -5,12 +5,15 @@
 
 mod level;
 
+use bevy::audio::{AudioPlayer, AudioSource, PlaybackSettings, Volume};
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 use bevy::window::{CursorGrabMode, PrimaryWindow};
-use dis_motion::{BlinkEvent, BlinkMode, Input as MotionInput, Motion, MotionState, MotionTuning};
+use dis_data::sounds::{Cue, Gait, Sounds, Surface};
+use dis_motion::{BlinkEvent, BlinkMode, Input as MotionInput, MantleKind, Motion, MotionState, MotionTuning, StepEvents};
+use std::collections::HashMap;
 use level::{Kind, Level};
 use std::path::PathBuf;
 
@@ -33,6 +36,52 @@ struct Sim {
     log: Vec<String>,
     look: Vec2,
     show_help: bool,
+    /// This frame's motion events and movement, for the audio system.
+    frame_events: StepEvents,
+    frame_move: dis_motion::Vec3,
+}
+
+/// Game sounds (decoded from the install) and the state that paces them.
+#[derive(Resource)]
+struct Sfx {
+    sounds: Sounds,
+    handles: HashMap<u32, Handle<AudioSource>>,
+    rng: u64,
+    muted: bool,
+    step_accum: f32,
+    climb_accum: f32,
+    sprint_time: f32,
+    breath_timer: f32,
+    swim_timer: f32,
+    prev_state: MotionState,
+    prev_crouched: bool,
+    warmup: Vec<Entity>,
+    fall_wind: Vec<Entity>,
+}
+
+impl Sfx {
+    fn rand(&mut self, n: usize) -> usize {
+        self.rng ^= self.rng << 13;
+        self.rng ^= self.rng >> 7;
+        self.rng ^= self.rng << 17;
+        (self.rng % n.max(1) as u64) as usize
+    }
+
+    fn play(&mut self, commands: &mut Commands, cue: Cue, volume: f32) -> Vec<Entity> {
+        if self.muted {
+            return Vec::new();
+        }
+        let Some(node) = self.sounds.get(cue).cloned() else { return Vec::new() };
+        if std::env::var_os("SINHONOR_LOG_SFX").is_some() {
+            println!("[sfx] {cue:?}");
+        }
+        let mut ids = node.choose(&mut |n| self.rand(n));
+        ids.dedup();
+        ids.into_iter()
+            .filter_map(|id| self.handles.get(&id).cloned())
+            .map(|h| commands.spawn((AudioPlayer::new(h), PlaybackSettings::DESPAWN.with_volume(Volume::Linear(volume)))).id())
+            .collect()
+    }
 }
 
 /// Scripted run for verification: `--autopilot <dir>` plays the steps, logs the motion state
@@ -135,6 +184,10 @@ fn main() {
     for w in &data.warnings {
         eprintln!("warning: {w}");
     }
+    let sounds = dis_data::sounds::load_sounds(&install, &data.blink.sound_events);
+    for w in &sounds.warnings {
+        eprintln!("sound warning: {w}");
+    }
     let tuning = MotionTuning::from_game(&data);
     let level = level::build();
     let motion = Motion::new(tuning.clone(), level.spawn, level.spawn_yaw);
@@ -147,6 +200,23 @@ fn main() {
         log: Vec::new(),
         look: Vec2::ZERO,
         show_help: true,
+        frame_events: StepEvents::default(),
+        frame_move: dis_motion::Vec3::ZERO,
+    };
+    let sfx = Sfx {
+        sounds,
+        handles: HashMap::new(),
+        rng: 0x9E37_79B9_7F4A_7C15,
+        muted: false,
+        step_accum: 0.0,
+        climb_accum: 0.0,
+        sprint_time: 0.0,
+        breath_timer: 0.0,
+        swim_timer: 0.0,
+        prev_state: MotionState::Falling,
+        prev_crouched: false,
+        warmup: Vec::new(),
+        fall_wind: Vec::new(),
     };
 
     App::new()
@@ -156,10 +226,11 @@ fn main() {
         }))
         .insert_resource(sim)
         .insert_resource(autopilot)
+        .insert_resource(sfx)
         .insert_resource(ClearColor(Color::srgb(0.55, 0.6, 0.66)))
         .insert_resource(AmbientLight { color: Color::WHITE, brightness: 400.0, ..default() })
-        .add_systems(Startup, (setup_scene, grab_cursor.run_if(|a: Res<Autopilot>| a.steps.is_empty())))
-        .add_systems(Update, (cursor_toggle, gather_look, simulate, draw_blink, update_camera, update_hud).chain())
+        .add_systems(Startup, (setup_scene, load_audio, grab_cursor.run_if(|a: Res<Autopilot>| a.steps.is_empty())))
+        .add_systems(Update, (cursor_toggle, gather_look, simulate, play_sounds, draw_blink, update_camera, update_hud).chain())
         .run();
 }
 
@@ -345,7 +416,10 @@ fn simulate(
         sim.show_help = !sim.show_help;
     }
     let Sim { motion, level, .. } = &mut *sim;
+    let before = motion.pos;
     let ev = motion.update(&level.world, &input, dt);
+    sim.frame_move = sim.motion.pos - before;
+    sim.frame_events = ev.clone();
     if ev.jumped {
         push_log(&mut sim, "jump".into());
     }
@@ -371,6 +445,148 @@ fn simulate(
         let (spawn, yaw, tuning) = (sim.level.spawn, sim.level.spawn_yaw, sim.tuning.clone());
         sim.motion = Motion::new(tuning, spawn, yaw);
     }
+}
+
+fn load_audio(mut sfx: ResMut<Sfx>, mut sources: ResMut<Assets<AudioSource>>) {
+    let clips: Vec<(u32, Vec<u8>)> = sfx.sounds.ogg.iter().map(|(k, v)| (*k, v.clone())).collect();
+    for (id, ogg) in clips {
+        let h = sources.add(AudioSource { bytes: ogg.into() });
+        sfx.handles.insert(id, h);
+    }
+}
+
+/// Surface under a point, from the course piece it stands on.
+fn surface_at(level: &Level, p: dis_motion::Vec3) -> Surface {
+    if level.world.water.iter().any(|w| w.contains(p + dis_motion::Vec3::Z * 4.0)) {
+        return Surface::Water;
+    }
+    let probe = p - dis_motion::Vec3::Z * 3.0;
+    let piece = level.pieces.iter().filter(|pc| !matches!(pc.kind, Kind::Water | Kind::Ladder)).find(|pc| {
+        probe.x >= pc.min.x - 1.0 && probe.x <= pc.max.x + 1.0 && probe.y >= pc.min.y - 1.0 && probe.y <= pc.max.y + 1.0 && probe.z >= pc.min.z - 1.0 && probe.z <= pc.max.z + 1.0
+    });
+    match piece.map(|pc| pc.kind) {
+        Some(Kind::Stairs | Kind::Ledge) => Surface::Wood,
+        Some(Kind::Roof) => Surface::Rooftile,
+        Some(Kind::Ladder) => Surface::Metal,
+        _ => Surface::Stone,
+    }
+}
+
+fn play_sounds(mut commands: Commands, time: Res<Time>, keys: Res<ButtonInput<KeyCode>>, sim: Res<Sim>, mut sfx: ResMut<Sfx>) {
+    if keys.just_pressed(KeyCode::KeyM) {
+        sfx.muted = !sfx.muted;
+    }
+    let dt = time.delta_secs();
+    let m = &sim.motion;
+    let ev = &sim.frame_events;
+    let feet = m.feet();
+    let surface = surface_at(&sim.level, feet);
+    let gait = if m.crouched { Gait::Sneak } else if m.sprinting { Gait::Sprint } else { Gait::Run };
+
+    // Footsteps by distance walked (not while blinking, mantling or teleporting).
+    let moved = sim.frame_move.truncate().length();
+    if matches!(m.state, MotionState::Walking) && moved < 100.0 {
+        sfx.step_accum += moved;
+        let stride = match gait {
+            Gait::Sneak => 100.0,
+            Gait::Run => 150.0,
+            Gait::Sprint => 210.0,
+        };
+        if sfx.step_accum >= stride {
+            sfx.step_accum = 0.0;
+            let vol = if gait == Gait::Sneak { 0.35 } else { 0.6 };
+            sfx.play(&mut commands, Cue::Footstep(surface, gait), vol);
+        }
+    } else if m.state != MotionState::Walking {
+        sfx.step_accum = 75.0; // first step lands soon after touching down
+    }
+    if m.state == MotionState::Ladder {
+        sfx.climb_accum += sim.frame_move.z.abs();
+        if sfx.climb_accum >= 45.0 {
+            sfx.climb_accum = 0.0;
+            sfx.play(&mut commands, Cue::Footstep(Surface::Metal, Gait::Sneak), 0.5);
+        }
+    }
+    if m.state == MotionState::Swimming && moved > 0.5 {
+        sfx.swim_timer -= dt;
+        if sfx.swim_timer <= 0.0 {
+            sfx.swim_timer = 1.1;
+            sfx.play(&mut commands, Cue::Swim, 0.6);
+        }
+    }
+
+    if ev.jumped {
+        sfx.play(&mut commands, Cue::Jump, 0.5);
+        sfx.play(&mut commands, Cue::Footstep(surface, Gait::Run), 0.5);
+    }
+    if let Some(impact) = ev.landed {
+        let wind: Vec<Entity> = std::mem::take(&mut sfx.fall_wind);
+        for e in wind {
+            commands.entity(e).try_despawn();
+        }
+        if impact > 1100.0 {
+            sfx.play(&mut commands, Cue::LandHigh(surface), 0.8);
+        } else if impact > 250.0 {
+            sfx.play(&mut commands, Cue::LandSmall(surface), 0.6);
+        }
+    }
+    if m.state == MotionState::Falling && m.vel.z < -900.0 && sfx.fall_wind.is_empty() {
+        let e = sfx.play(&mut commands, Cue::FallWind, 0.5);
+        sfx.fall_wind = e;
+    }
+    if let Some(kind) = ev.mantled {
+        let cue = match kind {
+            MantleKind::Low => Cue::MantleLow,
+            MantleKind::Medium => Cue::MantleMedium,
+            MantleKind::High => Cue::MantleHigh,
+        };
+        sfx.play(&mut commands, cue, 0.7);
+    }
+    if sfx.prev_state == MotionState::Mantling && m.state == MotionState::Walking {
+        sfx.play(&mut commands, Cue::MantleImpact, 0.6);
+    }
+    if ev.slid {
+        sfx.play(&mut commands, Cue::Slide, 0.7);
+    }
+    if m.state == MotionState::Swimming && sfx.prev_state != MotionState::Swimming {
+        sfx.play(&mut commands, Cue::WaterEnter, 0.7);
+    }
+    let crouch_by_player = matches!(m.state, MotionState::Walking) && matches!(sfx.prev_state, MotionState::Walking);
+    if m.crouched != sfx.prev_crouched && crouch_by_player {
+        sfx.play(&mut commands, if m.crouched { Cue::Crouch } else { Cue::Stand }, 0.45);
+    }
+
+    // Breathing after a long sprint.
+    if m.sprinting && m.state == MotionState::Walking {
+        sfx.sprint_time += dt;
+        sfx.breath_timer -= dt;
+        if sfx.sprint_time > 3.0 && sfx.breath_timer <= 0.0 {
+            sfx.breath_timer = 4.0;
+            sfx.play(&mut commands, Cue::SprintBreath, 0.5);
+        }
+    } else {
+        sfx.sprint_time = 0.0;
+    }
+
+    for b in &ev.blink {
+        match b {
+            BlinkEvent::StartedTargeting => {
+                let e = sfx.play(&mut commands, Cue::BlinkWarmup, 0.8);
+                sfx.warmup = e;
+            }
+            BlinkEvent::Released | BlinkEvent::Fizzled => {
+                let warm: Vec<Entity> = std::mem::take(&mut sfx.warmup);
+                for e in warm {
+                    commands.entity(e).try_despawn();
+                }
+                let cue = if *b == BlinkEvent::Released { Cue::BlinkRelease } else { Cue::BlinkFizzle };
+                sfx.play(&mut commands, cue, 0.9);
+            }
+            _ => {}
+        }
+    }
+    sfx.prev_state = m.state;
+    sfx.prev_crouched = m.crouched;
 }
 
 fn push_log(sim: &mut Sim, s: String) {
@@ -442,7 +658,7 @@ fn update_hud(sim: Res<Sim>, mut hud: Query<&mut Text, With<Hud>>) {
     }
     if sim.show_help {
         s.push_str(&format!(
-            "\nWASD move  Mouse look  Space jump/mantle  Ctrl/C crouch (sprint+crouch = slide)\nShift sprint  Alt walk  Q/E lean  RMB/F hold Blink, release to go  1/2 Blink tier\nR reset  F1 help  Esc free cursor / quit\n\nTuning read from {}\n{} warnings; run speed {:.0}, sprint {:.0}, jump {:.0}, gravity {:.0}",
+            "\nWASD move  Mouse look  Space jump/mantle  Ctrl/C crouch (sprint+crouch = slide)\nShift sprint  Alt walk  Q/E lean  RMB/F hold Blink, release to go  1/2 Blink tier\nR reset  M mute  F1 help  Esc free cursor / quit\n\nTuning read from {}\n{} warnings; run speed {:.0}, sprint {:.0}, jump {:.0}, gravity {:.0}",
             sim.source, sim.warnings, sim.tuning.run_speed, sim.tuning.sprint_speed, sim.tuning.jump_z, sim.tuning.gravity_z
         ));
     }

@@ -324,6 +324,34 @@ carrying-corpse variant). The vertical velocity of the base the player stands on
 | Ladder, swim | Simple models using the game's speeds and accelerations |
 | Agility (power jump, double jump) | Not implemented yet |
 
+## 6b. Sound (Wwise), read at runtime (2026-10-07)
+
+**Packages.** `CookedPCConsole/*.pck` are Wwise "AKPK" file packages, version 1. Header: `'AKPK'`, header size, version,
+language-map size, banks-LUT size, stream-LUT size. **This revision has one extra u32 before the language map**, so the
+banks LUT starts at `28 + langMapSize` and the stream LUT follows it. A LUT is a count followed by 20-byte entries
+`{id, blockSize, size, startBlock, languageId}`, where `offset = startBlock * blockSize`.
+
+**Soundbanks** are version 65 (Wwise 2011/2012). Sections are `BKHD`, `DIDX` (`{mediaId, offset, size}` into `DATA`),
+`DATA`, `HIRC` and `STID`. `HIRC` holds `{u8 type, u32 size, u32 id, payload}` objects. Used here:
+- **Event (4):** count, then action ids.
+- **Action (3):** `u16` type (`0x04xx` = Play), `u32` target.
+- **Sound (2):** source data starts with plugin id, stream type, then the media id.
+- **Containers:** random/sequence (5), switch (6) and layer (9). Their `NodeBaseParams` begin with the override-FX flag,
+  the FX count, the bus id and then the parent id. Children are recovered by matching sibling object ids in the payload
+  after the parent field, which avoids version-specific property parsing.
+
+Event ids are FNV-1 32-bit hashes of the lower-cased event name, and `AkEvent` objects in the UE3 packages carry those names.
+Media are Wwise Vorbis (`fmt` codec `0xFFFF`). They are converted to Ogg with the `ww2ogg` crate (BSD-3, a port of hcs's ww2ogg).
+`ww2ogg::validate` rejects loud impacts that legitimately clip, so the codebook set (standard or aoTuV) is chosen by fully
+decoding both and keeping the one with the least clipping.
+
+**Where the motion sounds are.**
+- Footsteps per surface and gait: `Bank_Footsteps.pck`, events `FS_P_<Surface>_{Sn,R,Sp,Fall_Small,Fall_High}`, plus `FS_P_Slide_*`.
+- Mantle, crouch, stand, fall wind, sprint breath and cloth: `Bank_Player.pck` (`Snd_P_*`).
+- Blink: `Bank_Power_Player.pck`. The event names come from `Twk_Blink.m_Levels[n].m_p{BlinkWarmup,Blink,Fizzle}SoundEvent`
+  (Start, Stop and Power_Empty).
+- Swim: `Bank_UI_Ingame_Water.pck` (`Snd_P_Swim`).
+
 ## 7. Status and next steps
 
 Done: `upk` (package reader), `dis_data` (tuning loader), `dis_motion` (motion core and Blink, tests),
@@ -339,7 +367,7 @@ Next:
 ## 8. Credits
 
 UELib / UE Explorer (Eliot van Uytfanghe), UE Viewer (Konstantin Nosov / Gildor), ue3-tools and dishonored-toolkit
-(deadYokai), dishonoredrecompiled and dismod (ectrc), CodeRed-Generator (CodeRedModding), lzokay-native (MIT), Ghidra (NSA, Apache-2.0).
+(deadYokai), dishonoredrecompiled and dismod (ectrc), CodeRed-Generator (CodeRedModding), lzokay-native (MIT), Ghidra (NSA, Apache-2.0), [ww2ogg](https://github.com/coconutbird/ww2ogg-rs) Rust port of [hcs64/ww2ogg](https://github.com/hcs64/ww2ogg) (BSD-3-Clause), lewton (MIT/Apache-2.0).
 Runtime dependencies: [Bevy](https://bevyengine.org) and [glam](https://github.com/bitshifter/glam-rs) (MIT OR Apache-2.0).
 Structural references: [iw4L](https://github.com/vladtrc/iw4L), [gang-beasts-rust](https://github.com/muffinmxn/gang-beasts-rust),
 [benilla](https://github.com/samwhosung/benilla), [2010-rust-rewrite-mashup](https://github.com/chasmlol/2010-rust-rewrite-mashup).
