@@ -1,0 +1,18 @@
+[package]
+name = "dis_motion"
+description = "Engine-agnostic Dishonored-style player motion and Blink"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["dishonored-data"]
+## Build tuning from the user's Dishonored install via dis_data.
+dishonored-data = ["dep:dis_data"]
+
+[dependencies]
+glam.workspace = true
+dis_data = { path = "../dis_data", optional = true }
+
+[dev-dependencies]
+dis_data = { path = "../dis_data" }

@@ -1,0 +1,257 @@
+//! Tuning consumed by the motion core. Filled from the game install by the `dishonored-data`
+//! feature ([`MotionTuning::from_game`]) or by the host from any other source.
+
+#[derive(Clone, Debug)]
+pub struct MotionTuning {
+    pub gravity_z: f32,
+    pub radius: f32,
+    pub half_height: f32,
+    pub crouch_radius: f32,
+    pub crouch_half_height: f32,
+    pub max_step_height: f32,
+    /// Eye height above the cylinder centre when standing.
+    pub base_eye_height: f32,
+    pub walkable_floor_z: f32,
+    pub max_fall_speed: f32,
+    pub ladder_speed: f32,
+
+    pub run_speed: f32,
+    pub sprint_speed: f32,
+    pub crouch_speed: f32,
+    pub walk_speed: f32,
+    pub water_speed: f32,
+    pub accel_rate: f32,
+    pub ground_friction: f32,
+    pub braking: f32,
+    pub strafe_mult_run: f32,
+    pub strafe_mult_sneak: f32,
+    pub strafe_mult_sprint: f32,
+    pub backward_mult_run: f32,
+    pub backward_mult_sneak: f32,
+    pub backward_mult_sprint: f32,
+    pub jump_z: f32,
+    pub air_control: f32,
+    pub fall_damage_speed: f32,
+    pub fall_death_speed: f32,
+
+    pub slide_time: f32,
+    pub slide_not_cancelable_pct: f32,
+    pub slide_allow_return_to_sprint: bool,
+    pub auto_crouch_test_distance: f32,
+
+    pub min_pitch_deg: f32,
+    pub max_pitch_deg: f32,
+    pub fov_deg: f32,
+    pub fov_blend_speed: f32,
+    pub bob_amount: f32,
+    pub roll_amount: f32,
+
+    pub lean: LeanTuning,
+    pub swim: SwimTuning,
+    pub mantle: MantleTuning,
+    pub mantle_blink: MantleTuning,
+    pub anim: AnimTimes,
+    pub blink: BlinkTuning,
+}
+
+#[derive(Clone, Debug)]
+pub struct LeanTuning {
+    pub max_angle_deg: f32,
+    pub max_angle_crouched_deg: f32,
+    pub camera_tilt_pct: f32,
+    pub height_pct: f32,
+    pub springiness: f32,
+    pub damping: f32,
+}
+
+#[derive(Clone, Debug)]
+pub struct SwimTuning {
+    pub min_accel: f32,
+    pub max_accel: f32,
+    pub max_speed_no_stroke: f32,
+    pub stroke_time: f32,
+}
+
+#[derive(Clone, Debug)]
+pub struct MantleTuning {
+    pub line_check_step: f32,
+    pub min_edge_height: f32,
+    pub max_edge_height: f32,
+    pub low_max_edge_height: f32,
+    pub medium_max_edge_height: f32,
+    pub low_uses_step_up: bool,
+    pub low_step_up_blend_time: f32,
+    pub max_vertical_angle_edge_face_deg: f32,
+    pub max_horizontal_angle_edge_face_deg: f32,
+    pub max_slope_angle_edge_top_deg: f32,
+    pub edge_search_dist: f32,
+    pub forward_move_amount: f32,
+    pub fall_speed_for_ledge_grab: f32,
+    pub max_fall_speed_for_mantle: f32,
+    pub ledge_grab_min_edge_height: f32,
+    pub anim_rate: f32,
+}
+
+/// Durations (seconds) of the first-person animations that pace motion.
+#[derive(Clone, Debug)]
+pub struct AnimTimes {
+    pub mantle_low: f32,
+    pub mantle_medium: f32,
+    pub mantle_high: f32,
+    pub crouch_mantle_low: f32,
+    pub crouch_mantle_medium: f32,
+    pub crouch_mantle_high: f32,
+    pub land_small: f32,
+    pub land_big: f32,
+    pub slide_in: f32,
+    pub slide_out: f32,
+}
+
+#[derive(Clone, Debug)]
+pub struct BlinkLevel {
+    pub distance: f32,
+    pub horiz_distance: f32,
+    pub vert_distance: f32,
+    pub step_distance: f32,
+    pub step_interval: f32,
+    pub warmup_time: f32,
+    pub cooldown_time: f32,
+    pub warmup_wobble_max: f32,
+    pub warmup_wobble_per_second: f32,
+    pub warmup_distortion_min: f32,
+    pub move_distortion_max: f32,
+    pub move_blur_max: f32,
+    pub move_reach_max_at_pct: f32,
+    pub cooldown_wobble_count: i32,
+}
+
+#[derive(Clone, Debug)]
+pub struct BlinkTuning {
+    pub levels: Vec<BlinkLevel>,
+    pub target_extent: [f32; 3],
+    pub close_collision_distance: f32,
+    pub close_collision_offset_step: f32,
+    pub limit_vertical_from_ground: bool,
+}
+
+#[cfg(feature = "dishonored-data")]
+impl MotionTuning {
+    /// Builds the tuning from data loaded out of the user's Dishonored install.
+    pub fn from_game(g: &dis_data::GameData) -> Self {
+        let p = &g.player;
+        let anim = |name: &str, fallback: f32| g.anim(name).unwrap_or(fallback);
+        let mantle = |m: &dis_data::MantleTuning| MantleTuning {
+            line_check_step: m.line_check_step,
+            min_edge_height: m.min_edge_height,
+            max_edge_height: m.max_edge_height,
+            low_max_edge_height: m.low_max_edge_height,
+            medium_max_edge_height: m.medium_max_edge_height,
+            low_uses_step_up: m.low_uses_step_up,
+            low_step_up_blend_time: m.low_step_up_blend_time,
+            max_vertical_angle_edge_face_deg: m.max_vertical_angle_edge_face,
+            max_horizontal_angle_edge_face_deg: m.max_horizontal_angle_edge_face,
+            max_slope_angle_edge_top_deg: m.max_slope_angle_edge_top,
+            edge_search_dist: m.edge_search_dist,
+            forward_move_amount: m.forward_move_amount,
+            fall_speed_for_ledge_grab: m.fall_speed_for_ledge_grab,
+            max_fall_speed_for_mantle: m.max_fall_speed_for_mantle,
+            ledge_grab_min_edge_height: m.ledge_grab_min_edge_height,
+            anim_rate: p.mantle_anim_rate,
+        };
+        MotionTuning {
+            gravity_z: p.gravity_z,
+            radius: p.collision_radius,
+            half_height: p.collision_half_height,
+            crouch_radius: p.crouch_radius,
+            crouch_half_height: p.crouch_half_height,
+            max_step_height: p.max_step_height,
+            base_eye_height: p.base_eye_height,
+            walkable_floor_z: p.walkable_floor_z,
+            max_fall_speed: p.max_fall_speed,
+            ladder_speed: p.ladder_speed,
+            run_speed: p.ground_speed,
+            sprint_speed: p.ground_speed_sprint,
+            crouch_speed: p.ground_speed_crouch,
+            walk_speed: p.ground_speed_walk,
+            water_speed: p.water_speed,
+            accel_rate: p.accel_rate,
+            ground_friction: p.ground_friction,
+            braking: p.ground_friction,
+            strafe_mult_run: p.strafe_mult_run,
+            strafe_mult_sneak: p.strafe_mult_sneak,
+            strafe_mult_sprint: p.strafe_mult_sprint,
+            backward_mult_run: p.backward_mult_run,
+            backward_mult_sneak: p.backward_mult_sneak,
+            backward_mult_sprint: p.backward_mult_sprint,
+            jump_z: p.jump_z_attribute,
+            air_control: p.air_control,
+            fall_damage_speed: p.max_speed_before_fall_damage,
+            fall_death_speed: p.max_speed_before_fall_death,
+            slide_time: p.slide_time,
+            slide_not_cancelable_pct: p.slide_percent_not_cancelable,
+            slide_allow_return_to_sprint: p.slide_allow_return_to_sprint,
+            auto_crouch_test_distance: p.auto_crouch_test_distance,
+            min_pitch_deg: p.min_view_pitch,
+            max_pitch_deg: p.max_view_pitch,
+            fov_deg: p.default_fov,
+            fov_blend_speed: p.fov_blend_speed,
+            bob_amount: p.bob_amount,
+            roll_amount: p.roll_amount,
+            lean: LeanTuning {
+                max_angle_deg: p.lean.max_angle,
+                max_angle_crouched_deg: p.lean.max_angle_crouched,
+                camera_tilt_pct: p.lean.camera_tilt_percent,
+                height_pct: p.lean.height_pct,
+                springiness: p.lean.springiness,
+                damping: p.lean.damping,
+            },
+            swim: SwimTuning {
+                min_accel: p.swim.min_accel,
+                max_accel: p.swim.max_accel,
+                max_speed_no_stroke: p.swim.max_speed_no_stroke,
+                stroke_time: p.swim.stroke_time,
+            },
+            mantle: mantle(&p.mantle),
+            mantle_blink: mantle(&p.mantle_blink),
+            anim: AnimTimes {
+                mantle_low: anim("Empty_MantleLow", 0.6),
+                mantle_medium: anim("Empty_MantleMedium", 0.7),
+                mantle_high: anim("Empty_MantleHigh", 1.0),
+                crouch_mantle_low: anim("Empty_CrouchMantleLow", 0.6),
+                crouch_mantle_medium: anim("Empty_CrouchMantleMedium", 0.7),
+                crouch_mantle_high: anim("Empty_CrouchMantleHigh", 1.0),
+                land_small: anim("Empty_JumpLandSmall", 0.5) / p.land_anim_rate.max(0.01),
+                land_big: anim("Generic_JumpLandBig", 1.0) / p.land_anim_rate.max(0.01),
+                slide_in: anim("Empty_SlideIn", 0.3),
+                slide_out: anim("Empty_SlideOutSneak", 0.3),
+            },
+            blink: BlinkTuning {
+                levels: g
+                    .blink
+                    .levels
+                    .iter()
+                    .map(|l| BlinkLevel {
+                        distance: l.distance,
+                        horiz_distance: l.horiz_distance,
+                        vert_distance: l.vert_distance,
+                        step_distance: l.step_distance,
+                        step_interval: l.step_interval,
+                        warmup_time: l.warmup_time,
+                        cooldown_time: l.cooldown_time,
+                        warmup_wobble_max: l.warmup_wobble_max,
+                        warmup_wobble_per_second: l.warmup_wobble_per_second,
+                        warmup_distortion_min: l.warmup_distortion_min,
+                        move_distortion_max: l.move_distortion_max,
+                        move_blur_max: l.move_blur_max,
+                        move_reach_max_at_pct: l.move_reach_max_at_pct,
+                        cooldown_wobble_count: l.cooldown_wobble_count,
+                    })
+                    .collect(),
+                target_extent: g.blink.target_test_extent,
+                close_collision_distance: g.blink.close_collision_distance,
+                close_collision_offset_step: g.blink.close_collision_offset_step,
+                limit_vertical_from_ground: g.blink.limit_vertical_from_ground,
+            },
+        }
+    }
+}

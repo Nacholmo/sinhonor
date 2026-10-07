@@ -41,6 +41,9 @@ pub struct PlayerTuning {
     pub base_eye_height: f32,
     pub max_fall_speed: f32,
     pub ladder_speed: f32,
+    pub walkable_floor_z: f32,
+    pub ground_friction: f32,
+    pub water_friction: f32,
 
     pub ground_speed: f32,
     pub ground_speed_sprint: f32,
@@ -69,6 +72,8 @@ pub struct PlayerTuning {
     pub auto_crouch_test_distance: f32,
     pub auto_crouch_min_crawl_depth: f32,
 
+    pub bob_amount: f32,
+    pub roll_amount: f32,
     pub min_view_pitch: f32,
     pub max_view_pitch: f32,
     pub default_fov: f32,
@@ -161,7 +166,16 @@ pub struct GameData {
     pub difficulty: Difficulty,
     pub player: PlayerTuning,
     pub blink: BlinkTuning,
+    /// Player animation lengths in seconds (`SequenceLength / RateScale`), keyed by sequence name,
+    /// from the first-person `Ply_*` AnimSets in `Startup.upk`.
+    pub anim_lengths: std::collections::HashMap<String, f32>,
     pub warnings: Vec<String>,
+}
+
+impl GameData {
+    pub fn anim(&self, name: &str) -> Option<f32> {
+        self.anim_lengths.get(name).copied()
+    }
 }
 
 #[derive(Debug)]
@@ -293,6 +307,10 @@ pub fn load(install: &Path, difficulty: Difficulty) -> Result<GameData, Error> {
     }
 
     let startup = open(install, "Startup.upk")?;
+    let engine = open(install, "Engine.upk")?;
+    let engine_pawn = props_at(&engine, "Default__Pawn").unwrap_or_default();
+    let phys_vol = props_at(&engine, "Default__PhysicsVolume").unwrap_or_default();
+    let water_vol = props_at(&engine, "Default__WaterVolume").unwrap_or_default();
     let game = open(install, "DishonoredGame.upk")?;
 
     // --- player tweak tree (Startup.upk) ---
@@ -350,6 +368,9 @@ pub fn load(install: &Path, difficulty: Difficulty) -> Result<GameData, Error> {
         base_eye_height: cx.f("BaseEyeHeight", pf("BaseEyeHeight"), 60.0),
         max_fall_speed: cx.f("m_fMaxFallSpeed", ini("DishonoredGame.DishonoredPlayerPawn", "m_fMaxFallSpeed").or(pf("MaxFallSpeed")), 2000.0),
         ladder_speed: cx.f("LadderSpeed", pf("LadderSpeed"), 200.0),
+        walkable_floor_z: cx.f("WalkableFloorZ", pf("WalkableFloorZ").or(fval(&engine_pawn, "WalkableFloorZ")), 0.7),
+        ground_friction: cx.f("GroundFriction", fval(&phys_vol, "GroundFriction"), 8.0),
+        water_friction: cx.f("WaterVolume FluidFriction", fval(&water_vol, "FluidFriction"), 2.0),
 
         ground_speed: cx.f("m_GroundSpeed", a("m_GroundSpeed"), 400.0),
         ground_speed_sprint: cx.f("m_GroundSpeedSprint", a("m_GroundSpeedSprint"), 600.0),
@@ -378,6 +399,8 @@ pub fn load(install: &Path, difficulty: Difficulty) -> Result<GameData, Error> {
         auto_crouch_test_distance: cx.f("m_fAutoCrouchTestDistance", fval(&top, "m_fAutoCrouchTestDistance"), 100.0),
         auto_crouch_min_crawl_depth: cx.f("m_fAutoCrouchMinCrawlDepth", fval(&top, "m_fAutoCrouchMinCrawlDepth"), 10.0),
 
+        bob_amount: cx.f("m_BobAmount", ini("DishonoredGame.DishonoredPlayerCamera", "m_BobAmount"), 0.5),
+        roll_amount: cx.f("m_RollAmount", ini("DishonoredGame.DishonoredPlayerCamera", "m_RollAmount"), 0.5),
         min_view_pitch: cx.f("m_fMinViewPitch", fval(&camera, "m_fMinViewPitch"), -85.0),
         max_view_pitch: cx.f("m_fMaxViewPitch", fval(&camera, "m_fMaxViewPitch"), 85.0),
         default_fov: cx.f("m_fDefaultFOV", ini("DishonoredGame.DishonoredPlayerCamera", "m_fDefaultFOV"), 75.0),
@@ -466,7 +489,21 @@ pub fn load(install: &Path, difficulty: Difficulty) -> Result<GameData, Error> {
         impulse_strength: cfg.f32(BLINK, "m_fImpulseStrength").unwrap_or(0.0),
     };
 
-    Ok(GameData { install: install.to_path_buf(), difficulty, player, blink, warnings: cx.warnings })
+    let mut anim_lengths = std::collections::HashMap::new();
+    for i in startup.exports_of_class("AnimSequence") {
+        if !startup.object_path(ObjRef::Export(i)).starts_with("Ply_") {
+            continue;
+        }
+        let Ok(p) = startup.properties(i) else { continue };
+        let (Some(Value::Name(name)), Some(len)) = (lookup(&p, "SequenceName"), fval(&p, "SequenceLength")) else { continue };
+        let rate = fval(&p, "RateScale").filter(|r| *r > 0.0).unwrap_or(1.0);
+        anim_lengths.entry(name.clone()).or_insert(len / rate);
+    }
+    if anim_lengths.is_empty() {
+        cx.warnings.push("no player animations found in Startup.upk".into());
+    }
+
+    Ok(GameData { install: install.to_path_buf(), difficulty, player, blink, anim_lengths, warnings: cx.warnings })
 }
 
 /// Parses `(m_Springiness=80.0,m_Damping=12.0)`.
