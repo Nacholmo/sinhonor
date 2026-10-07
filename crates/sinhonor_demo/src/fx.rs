@@ -8,12 +8,13 @@ use bevy::pbr::{NotShadowCaster, NotShadowReceiver};
 use bevy::prelude::*;
 use bevy::render::mesh::{Indices, PrimitiveTopology};
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
-use bevy::render::view::NoFrustumCulling;
-use cascade::{Alignment, Blend, Instance};
+use bevy::render::view::{NoFrustumCulling, RenderLayers};
+use cascade::{Alignment, Blend, Instance, SystemDef};
 use dis_data::effects::{Effects, Fx};
 use dis_motion::Vec3 as UVec3;
 use glam::{Affine3A, Mat3};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 const SCALE: f32 = crate::SCALE;
 
@@ -22,6 +23,9 @@ pub enum Attach {
     World,
     /// Placed `lens_distance` in front of the camera every frame.
     Camera,
+    /// Simulated in view space (X right, Y back, Z up, in Unreal units) and drawn by the
+    /// viewmodel camera with the arms; the hands module moves it with its socket.
+    Viewmodel,
 }
 
 pub struct Live {
@@ -36,7 +40,8 @@ pub struct FxWorld {
     pub live: Vec<Live>,
     next_id: u64,
     materials: HashMap<String, Handle<StandardMaterial>>,
-    batches: HashMap<String, Handle<Mesh>>,
+    /// Per-material meshes, keyed by (viewmodel layer?, material).
+    batches: HashMap<(bool, String), Handle<Mesh>>,
     /// Camera basis (Unreal space), updated each frame for lens effects.
     pub camera: Affine3A,
 }
@@ -49,10 +54,17 @@ impl FxWorld {
     /// Starts an effect; returns its id (0 if the effect isn't available).
     pub fn spawn(&mut self, fx: Fx, transform: Affine3A, attach: Attach) -> u64 {
         let Some(def) = self.effects.systems.get(&fx).cloned() else { return 0 };
+        self.spawn_def(def, transform, attach)
+    }
+
+    pub fn spawn_def(&mut self, def: Arc<SystemDef>, transform: Affine3A, attach: Attach) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
         let t = if attach == Attach::Camera { self.lens_transform() } else { transform };
-        let distance = (t.translation - self.camera.translation).length();
+        let distance = match attach {
+            Attach::Viewmodel => t.translation.length(),
+            _ => (t.translation - self.camera.translation).length(),
+        };
         self.live.push(Live { id, inst: Instance::new_at_distance(def, t, id.wrapping_mul(0x9E37_79B9_7F4A_7C15), distance), attach });
         id
     }
@@ -61,6 +73,10 @@ impl FxWorld {
         if let Some(l) = self.live.iter_mut().find(|l| l.id == id) {
             l.inst.transform = transform;
         }
+    }
+
+    pub fn is_live(&self, id: u64) -> bool {
+        self.live.iter().any(|l| l.id == id)
     }
 
     pub fn stop(&mut self, id: u64) {
@@ -125,13 +141,14 @@ pub fn update_fx(
             l.inst.transform = lens;
         }
         // Distance-based LOD, as the engine does (`LODDistances`).
-        l.inst.set_camera_distance((l.inst.transform.translation - eye).length());
+        let from = if l.attach == Attach::Viewmodel { glam::Vec3A::ZERO } else { eye };
+        l.inst.set_camera_distance((l.inst.transform.translation - from).length());
         l.inst.update(dt);
     }
     fx.live.retain(|l| !l.inst.is_finished());
 
     let Ok(cam) = cams.single() else { return };
-    let (right, up, fwd) = (cam.right().as_vec3(), cam.up().as_vec3(), cam.forward().as_vec3());
+    let world_basis = (cam.right().as_vec3(), cam.up().as_vec3(), cam.forward().as_vec3());
 
     struct Batch {
         pos: Vec<[f32; 3]>,
@@ -140,9 +157,12 @@ pub fn update_fx(
         nrm: Vec<[f32; 3]>,
         idx: Vec<u32>,
     }
-    let mut batches: HashMap<String, Batch> = HashMap::new();
+    let mut batches: HashMap<(bool, String), Batch> = HashMap::new();
     let mut new_materials = Vec::new();
     for l in &fx.live {
+        let vm = l.attach == Attach::Viewmodel;
+        // The viewmodel camera sits at the origin looking down -Z.
+        let (right, up, fwd) = if vm { (Vec3::X, Vec3::Y, Vec3::NEG_Z) } else { world_basis };
         let defs = l.inst.emitter_defs();
         for p in l.inst.particles() {
             let e = &defs[p.emitter];
@@ -176,7 +196,7 @@ pub fn update_fx(
                 }
             };
             let col = [p.color[0].max(0.0), p.color[1].max(0.0), p.color[2].max(0.0), p.color[3].clamp(0.0, 1.0)];
-            let b_ = batches.entry(mat.name.clone()).or_insert_with(|| Batch { pos: vec![], uv: vec![], col: vec![], nrm: vec![], idx: vec![] });
+            let b_ = batches.entry((vm, mat.name.clone())).or_insert_with(|| Batch { pos: vec![], uv: vec![], col: vec![], nrm: vec![], idx: vec![] });
             let base = b_.pos.len() as u32;
             for (corner, uv) in [(-a - b, [0.0, 1.0]), (a - b, [1.0, 1.0]), (a + b, [1.0, 0.0]), (-a + b, [0.0, 0.0])] {
                 b_.pos.push((c + corner).into());
@@ -208,16 +228,16 @@ pub fn update_fx(
         fx.materials.insert(m.name.clone(), handle);
     }
     // Upload batches; materials with no particles this frame get an empty (degenerate) mesh.
-    let names: Vec<String> = fx.materials.keys().cloned().collect();
-    for name in names {
-        let b = batches.remove(&name).unwrap_or(Batch { pos: vec![[0.0; 3]; 3], uv: vec![[0.0; 2]; 3], col: vec![[0.0; 4]; 3], nrm: vec![[0.0, 1.0, 0.0]; 3], idx: vec![0, 1, 2] });
+    let keys: Vec<(bool, String)> = fx.batches.keys().cloned().chain(batches.keys().cloned()).collect::<std::collections::HashSet<_>>().into_iter().collect();
+    for key in keys {
+        let b = batches.remove(&key).unwrap_or(Batch { pos: vec![[0.0; 3]; 3], uv: vec![[0.0; 2]; 3], col: vec![[0.0; 4]; 3], nrm: vec![[0.0, 1.0, 0.0]; 3], idx: vec![0, 1, 2] });
         let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
         mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, b.pos);
         mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, b.nrm);
         mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, b.uv);
         mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, b.col);
         mesh.insert_indices(Indices::U32(b.idx));
-        match fx.batches.get(&name) {
+        match fx.batches.get(&key) {
             Some(h) => {
                 if let Some(m) = meshes.get_mut(h) {
                     *m = mesh;
@@ -225,9 +245,10 @@ pub fn update_fx(
             }
             None => {
                 let h = meshes.add(mesh);
-                let mat = fx.materials[&name].clone();
-                commands.spawn((Mesh3d(h.clone()), MeshMaterial3d(mat), Transform::IDENTITY, NoFrustumCulling, NotShadowCaster, NotShadowReceiver));
-                fx.batches.insert(name, h);
+                let mat = fx.materials[&key.1].clone();
+                let layer = RenderLayers::layer(if key.0 { crate::hands::LAYER } else { 0 });
+                commands.spawn((Mesh3d(h.clone()), MeshMaterial3d(mat), Transform::IDENTITY, NoFrustumCulling, NotShadowCaster, NotShadowReceiver, layer));
+                fx.batches.insert(key, h);
             }
         }
     }

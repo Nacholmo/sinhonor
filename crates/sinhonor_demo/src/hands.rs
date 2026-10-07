@@ -12,12 +12,12 @@ use bevy::render::camera::ClearColorConfig;
 use bevy::render::mesh::{Indices, PrimitiveTopology};
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::render::view::{NoFrustumCulling, RenderLayers};
-use dis_data::viewmodel::{MeshPart, ViewModel};
+use dis_data::viewmodel::{MeshPart, ParticleNotify, ViewModel};
 use dis_motion::{BlinkMode, MotionState};
 use edge_anim::Joint;
 use glam::{Mat4, Quat, Vec3 as GVec3};
 
-const LAYER: usize = 1;
+pub const LAYER: usize = 1;
 const SCALE: f32 = crate::SCALE;
 /// Crossfade time between animations.
 const BLEND: f32 = 0.18;
@@ -49,7 +49,26 @@ impl Layer {
         self.current = Some(t);
         self.time = 0.0;
     }
-    fn advance(&mut self, dt: f32) {
+    /// Advances the clock and returns the particle notifies of the current track passed in
+    /// `[old time, new time)`, wrapping for loops.
+    fn advance(&mut self, dt: f32, vm: &ViewModel) -> Vec<ParticleNotify> {
+        let mut fired = Vec::new();
+        if let Some(t) = &self.current {
+            if let (Some(list), Some(a)) = (vm.particle_notifies.get(&t.name), vm.anims.get(&t.name)) {
+                let (from, to) = (self.time, self.time + dt);
+                for n in list {
+                    let hit = if t.looping && a.duration > 0.0 {
+                        let k = ((from - n.time) / a.duration).ceil();
+                        n.time + k * a.duration < to
+                    } else {
+                        n.time >= from && n.time < to && n.time <= a.duration
+                    };
+                    if hit {
+                        fired.push(n.clone());
+                    }
+                }
+            }
+        }
         self.time += dt;
         self.fade = (self.fade - dt).max(0.0);
         if let Some((_, t)) = self.previous.as_mut() {
@@ -58,6 +77,7 @@ impl Layer {
         if self.fade <= 0.0 {
             self.previous = None;
         }
+        fired
     }
     /// Finished a one-shot?
     fn done(&self, vm: &ViewModel) -> bool {
@@ -86,6 +106,8 @@ pub struct Hands {
     landing: f32,
     /// `RightHandWpn` socket offset on `handAttachment_R_jnt`.
     sword_socket: Mat4,
+    /// Live animation effects that follow a socket or bone: (effect id, bone, offset).
+    attached_fx: Vec<(u64, usize, Mat4)>,
     pub visible: bool,
 }
 
@@ -181,6 +203,7 @@ pub fn setup_hands(
         Camera3d::default(),
         Camera { order: 1, clear_color: ClearColorConfig::None, ..default() },
         Projection::from(PerspectiveProjection { fov: sim.tuning.fov_deg.to_radians(), near: 0.01, ..default() }),
+        crate::color_grading(),
         Transform::IDENTITY,
         layer.clone(),
         ViewmodelCamera,
@@ -201,6 +224,7 @@ pub fn setup_hands(
         prev_blink: BlinkMode::Idle,
         landing: 0.0,
         sword_socket: rotator(asset_socket.unwrap_or([0, 16384, 0])) * sword_origin,
+        attached_fx: Vec::new(),
         visible: true,
         vm,
     });
@@ -258,6 +282,7 @@ pub fn update_hands(
     mut meshes: ResMut<Assets<Mesh>>,
     mut lights: Query<&mut Transform, With<ViewmodelLight>>,
     mut cams: Query<&mut Projection, With<ViewmodelCamera>>,
+    mut fx: ResMut<crate::fx::FxWorld>,
 ) {
     let Some(mut h) = hands else { return };
     if keys.just_pressed(KeyCode::KeyH) {
@@ -323,12 +348,19 @@ pub fn update_hands(
     }
     h.prev_blink = blink;
     h.prev_state = m.state;
-    h.base.advance(dt);
-    h.left.advance(dt);
+    let mut fired = {
+        let h = &mut *h;
+        let mut f = h.base.advance(dt, &h.vm);
+        f.extend(h.left.advance(dt, &h.vm));
+        f
+    };
 
     // --- pose: base layer everywhere, power layer on the left arm (not while the body is busy) ---
     let Some(mut pose) = layer_pose(&h.vm, &h.base) else { return };
     let left_on = !matches!(m.state, MotionState::Mantling | MotionState::Sliding | MotionState::Swimming);
+    if !left_on {
+        fired.retain(|n| n.socket.as_deref() != Some("Tattoo"));
+    }
     if left_on {
         if let Some(lp) = layer_pose(&h.vm, &h.left) {
             blend(&mut pose, &lp, 1.0, Some(&h.left_joints));
@@ -340,6 +372,30 @@ pub fn update_hands(
     let to_view = Mat4::from_cols(GVec3::new(0.0, SCALE, 0.0).extend(0.0), GVec3::new(SCALE, 0.0, 0.0).extend(0.0), GVec3::new(0.0, 0.0, SCALE).extend(0.0), glam::Vec4::W);
     let view = to_view * world[h.cam_joint].inverse();
     let _ = h.root_joint;
+
+    // --- animation particle effects, simulated in the viewmodel frame (see fx::Attach) ---
+    // camera_jnt (+X up, +Y right, +Z back) -> effect frame (X right, Y back, Z up).
+    let cam_to_fx = Mat4::from_cols(glam::Vec4::Z, glam::Vec4::X, glam::Vec4::Y, glam::Vec4::W) * world[h.cam_joint].inverse();
+    let as_affine = |m: Mat4| glam::Affine3A::from_mat4(m);
+    let mut follow = Vec::new();
+    if h.visible {
+        for n in fired {
+            let (bone, offset) = match n.socket.as_ref().and_then(|s| h.vm.sockets.get(s)) {
+                Some((b, loc, rot)) => (b.clone(), Mat4::from_translation(GVec3::from(*loc)) * rotator(*rot)),
+                None => (n.bone.clone().unwrap_or_default(), Mat4::IDENTITY),
+            };
+            let Some(bi) = bones.iter().position(|b| b.name.eq_ignore_ascii_case(&bone)) else { continue };
+            let id = fx.spawn_def(n.system.clone(), as_affine(cam_to_fx * world[bi] * offset), crate::fx::Attach::Viewmodel);
+            if n.attached && id != 0 {
+                follow.push((id, bi, offset));
+            }
+        }
+    }
+    h.attached_fx.extend(follow);
+    h.attached_fx.retain(|(id, ..)| fx.is_live(*id));
+    for (id, bi, offset) in &h.attached_fx {
+        fx.set_transform(*id, as_affine(cam_to_fx * world[*bi] * *offset));
+    }
 
     let skin = |part: &MeshPart, mats: &[Mat4], rigid: Option<Mat4>, mesh: &mut Mesh| {
         let mut pos = Vec::with_capacity(part.mesh.vertices.len());
@@ -385,7 +441,9 @@ pub fn update_hands(
     }
     if let (Some(sword), Some(handle)) = (h.vm.sword.as_ref(), h.sword_mesh.as_ref()) {
         if let Some(mesh) = meshes.get_mut(handle) {
-            let attach = if hidden { Mat4::ZERO } else { view * world[h.attach_joint] * h.sword_socket };
+            // `Empty_*` animations are the unarmed set (swimming): the sword is put away.
+            let unarmed = h.base.current.as_ref().is_some_and(|t| t.name.starts_with("Empty_"));
+            let attach = if hidden || unarmed { Mat4::ZERO } else { view * world[h.attach_joint] * h.sword_socket };
             skin(sword, &[], Some(attach), mesh);
         }
     }

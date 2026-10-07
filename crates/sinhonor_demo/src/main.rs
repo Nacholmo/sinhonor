@@ -9,11 +9,13 @@ mod level;
 
 use bevy::audio::{AudioPlayer, AudioSource, PlaybackSettings, Volume};
 use bevy::input::mouse::AccumulatedMouseMotion;
+use bevy::core_pipeline::motion_blur::MotionBlur;
 use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 use bevy::window::{CursorGrabMode, PrimaryWindow};
 use dis_data::sounds::{Cue, Gait, Sounds, Surface};
+use dis_data::surfaces::Surface as TexSurface;
 use dis_motion::{BlinkEvent, BlinkMode, Input as MotionInput, MantleKind, Motion, MotionState, MotionTuning, StepEvents};
 use glam::Affine3A as Affine3AId;
 use std::collections::HashMap;
@@ -29,6 +31,13 @@ const MOUSE_SENS: f32 = 0.0022;
 fn to_bevy(v: dis_motion::Vec3) -> Vec3 {
     Vec3::new(v.x, v.z, v.y) * SCALE
 }
+
+/// Haze and horizon colour.
+const HORIZON: Color = Color::srgb(0.58, 0.62, 0.66);
+
+/// Environment textures from the install, for dressing the course.
+#[derive(Resource)]
+struct SurfacesRes(dis_data::surfaces::Surfaces);
 
 #[derive(Resource)]
 pub struct Sim {
@@ -254,6 +263,10 @@ fn main() {
     for w in &effects.warnings {
         eprintln!("effect warning: {w}");
     }
+    let surfaces = dis_data::surfaces::load_surfaces(&install);
+    for w in &surfaces.warnings {
+        eprintln!("texture warning: {w}");
+    }
     let tuning = MotionTuning::from_game(&data);
     let level = level::build();
     let motion = Motion::new(tuning.clone(), level.spawn, level.spawn_yaw);
@@ -302,8 +315,9 @@ fn main() {
         .insert_resource(fx::FxWorld::new(effects))
         .insert_resource(FxState::default())
         .insert_resource(hands::HandsAsset(std::sync::Mutex::new(viewmodel)))
-        .insert_resource(ClearColor(Color::srgb(0.42, 0.46, 0.52)))
-        .insert_resource(AmbientLight { color: Color::srgb(0.75, 0.8, 0.9), brightness: 250.0, ..default() })
+        .insert_resource(SurfacesRes(surfaces))
+        .insert_resource(ClearColor(HORIZON))
+        .insert_resource(AmbientLight { color: Color::srgb(0.75, 0.8, 0.9), brightness: 600.0, ..default() })
         .add_systems(Startup, (setup_scene, load_audio, hands::setup_hands, grab_cursor.run_if(|a: Res<Autopilot>| a.steps.is_empty())))
         .add_systems(Update, (cursor_toggle, gather_look, simulate, play_sounds, fx_triggers, update_camera, hands::update_hands, fx::update_fx, draw_blink, update_hud).chain())
         .run();
@@ -339,20 +353,157 @@ fn vignette_image() -> Image {
     Image::new(Extent3d { width: n, height: n, depth_or_array_layers: 1 }, TextureDimension::D2, px, TextureFormat::Rgba8UnormSrgb, bevy::asset::RenderAssetUsages::default())
 }
 
-fn setup_scene(mut commands: Commands, sim: Res<Sim>, mut meshes: ResMut<Assets<Mesh>>, mut materials: ResMut<Assets<StandardMaterial>>, mut images: ResMut<Assets<Image>>) {
+/// The game texture a piece is dressed with, its tint and its tile size in metres.
+fn surface_for(kind: Kind) -> Option<(TexSurface, Color, f32)> {
+    match kind {
+        Kind::Ground => Some((TexSurface::Cobbles, Color::srgb(0.85, 0.85, 0.85), 3.0)),
+        Kind::Gravel => Some((TexSurface::Cobbles, Color::srgb(0.75, 0.68, 0.58), 1.2)),
+        Kind::Wall | Kind::Ledge => Some((TexSurface::Rock, Color::linear_rgb(1.7, 1.65, 1.6), 4.0)),
+        Kind::Roof => Some((TexSurface::Rock, Color::linear_rgb(1.4, 1.2, 1.1), 4.0)),
+        Kind::Stairs | Kind::Ladder => Some((TexSurface::Planks, Color::WHITE, 1.5)),
+        Kind::Guard | Kind::Water => None,
+    }
+}
+
+/// An RGBA texture with a box-filtered mip chain, repeating, anisotropic.
+fn tiled_image(t: &upk::texture::Rgba, srgb: bool, flip_green: bool) -> Image {
+    use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
+    use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+    let (w0, h0) = (t.width, t.height);
+    let mut level = t.pixels.clone();
+    if flip_green {
+        // Unreal normal maps are Y-down; Bevy's are Y-up.
+        level.chunks_exact_mut(4).for_each(|p| p[1] = 255 - p[1]);
+    }
+    let mut data = level.clone();
+    let (mut w, mut h, mut mips) = (w0, h0, 1);
+    while w > 1 || h > 1 {
+        let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
+        let mut next = vec![0u8; (nw * nh * 4) as usize];
+        for y in 0..nh {
+            for x in 0..nw {
+                for c in 0..4 {
+                    let at = |xx: u32, yy: u32| level[((yy.min(h - 1) * w + xx.min(w - 1)) * 4 + c) as usize] as u32;
+                    let sum = at(2 * x, 2 * y) + at(2 * x + 1, 2 * y) + at(2 * x, 2 * y + 1) + at(2 * x + 1, 2 * y + 1);
+                    next[((y * nw + x) * 4 + c) as usize] = (sum / 4) as u8;
+                }
+            }
+        }
+        data.extend_from_slice(&next);
+        (w, h, level, mips) = (nw, nh, next, mips + 1);
+    }
+    let format = if srgb { TextureFormat::Rgba8UnormSrgb } else { TextureFormat::Rgba8Unorm };
+    let mut img = Image::new(Extent3d { width: w0, height: h0, depth_or_array_layers: 1 }, TextureDimension::D2, t.pixels.clone(), format, bevy::asset::RenderAssetUsages::default());
+    img.data = Some(data);
+    img.texture_descriptor.mip_level_count = mips;
+    img.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: ImageAddressMode::Repeat,
+        address_mode_v: ImageAddressMode::Repeat,
+        mag_filter: ImageFilterMode::Linear,
+        min_filter: ImageFilterMode::Linear,
+        mipmap_filter: ImageFilterMode::Linear,
+        anisotropy_clamp: 16,
+        ..default()
+    });
+    img
+}
+
+/// Axis-aligned box in Bevy space with world-space UVs (`tile` metres per repeat), so textures
+/// keep their scale across pieces of any size.
+fn box_mesh(min: Vec3, max: Vec3, tile: f32) -> Mesh {
+    use bevy::render::mesh::{Indices, PrimitiveTopology};
+    let (c, half) = ((min + max) * 0.5, (max - min).abs() * 0.5);
+    let (mut pos, mut nrm, mut uv, mut idx) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    // (normal, u, v) with u x v = normal, so the corners below wind counter-clockwise.
+    for (n, u, v) in [
+        (Vec3::X, Vec3::NEG_Z, Vec3::Y),
+        (Vec3::NEG_X, Vec3::Z, Vec3::Y),
+        (Vec3::Z, Vec3::X, Vec3::Y),
+        (Vec3::NEG_Z, Vec3::NEG_X, Vec3::Y),
+        (Vec3::Y, Vec3::X, Vec3::NEG_Z),
+        (Vec3::NEG_Y, Vec3::X, Vec3::Z),
+    ] {
+        let face = c + n * half.dot(n.abs());
+        let (hu, hv) = (u * half.dot(u.abs()), v * half.dot(v.abs()));
+        let base = pos.len() as u32;
+        for (su, sv) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+            let p = face + hu * su + hv * sv;
+            pos.push(p.to_array());
+            nrm.push(n.to_array());
+            uv.push([p.dot(u) / tile, -p.dot(v) / tile]);
+        }
+        idx.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, bevy::asset::RenderAssetUsages::default());
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, pos);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, nrm);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uv);
+    mesh.insert_indices(Indices::U32(idx));
+    let _ = mesh.generate_tangents();
+    mesh
+}
+
+/// The look shared by the world and viewmodel cameras: Dunwall's cool, desaturated grade.
+pub fn color_grading() -> bevy::render::view::ColorGrading {
+    use bevy::render::view::{ColorGrading, ColorGradingGlobal, ColorGradingSection};
+    ColorGrading {
+        global: ColorGradingGlobal { exposure: -0.1, temperature: -0.12, post_saturation: 0.72, ..default() },
+        shadows: ColorGradingSection { saturation: 0.8, contrast: 1.08, lift: 0.01, ..default() },
+        midtones: ColorGradingSection { saturation: 0.85, ..default() },
+        highlights: ColorGradingSection { saturation: 0.8, gain: 1.05, ..default() },
+    }
+}
+
+fn setup_scene(
+    mut commands: Commands,
+    sim: Res<Sim>,
+    surfaces: Res<SurfacesRes>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    let mut textured: HashMap<TexSurface, (Handle<Image>, Option<Handle<Image>>)> = HashMap::new();
+    for (s, t) in &surfaces.0.textures {
+        let d = images.add(tiled_image(&t.diffuse, true, false));
+        let n = t.normal.as_ref().map(|n| images.add(tiled_image(n, false, true)));
+        textured.insert(*s, (d, n));
+    }
     for p in &sim.level.pieces {
         let (a, b) = (to_bevy(p.min), to_bevy(p.max));
-        let size = (b - a).abs();
-        let center = (a + b) * 0.5;
-        let transparent = p.kind == Kind::Water;
-        let material = materials.add(StandardMaterial {
-            base_color: color_for(p.kind),
-            perceptual_roughness: 0.9,
-            alpha_mode: if transparent { AlphaMode::Blend } else { AlphaMode::Opaque },
-            ..default()
-        });
-        commands.spawn((Mesh3d(meshes.add(Cuboid::new(size.x, size.y, size.z))), MeshMaterial3d(material), Transform::from_translation(center)));
+        let (lo, hi) = (a.min(b), a.max(b));
+        let surface = surface_for(p.kind).and_then(|(s, tint, tile)| textured.get(&s).map(|t| (t.clone(), tint, tile)));
+        let (material, tile) = match surface {
+            Some(((d, n), tint, tile)) => (
+                StandardMaterial { base_color: tint, base_color_texture: Some(d), normal_map_texture: n, perceptual_roughness: 0.85, reflectance: 0.3, ..default() },
+                tile,
+            ),
+            None if p.kind == Kind::Water => (
+                StandardMaterial { base_color: Color::srgba(0.06, 0.10, 0.11, 0.8), perceptual_roughness: 0.08, reflectance: 0.6, alpha_mode: AlphaMode::Blend, ..default() },
+                1.0,
+            ),
+            None => (StandardMaterial { base_color: color_for(p.kind), perceptual_roughness: 0.9, ..default() }, 1.0),
+        };
+        commands.spawn((Mesh3d(meshes.add(box_mesh(lo, hi, tile))), MeshMaterial3d(materials.add(material)), Transform::IDENTITY));
     }
+    // Overcast sky: pale at the horizon (the fog colour), greyer blue overhead.
+    let mut sky = Sphere::new(600.0).mesh().uv(48, 24);
+    if let Some(bevy::render::mesh::VertexAttributeValues::Float32x3(p)) = sky.attribute(Mesh::ATTRIBUTE_POSITION) {
+        let cols: Vec<[f32; 4]> = p
+            .iter()
+            .map(|v| {
+                let t = (v[1] / 600.0).clamp(0.0, 1.0).powf(0.6);
+                let (h, z) = (LinearRgba::from(HORIZON), LinearRgba::from(Color::srgb(0.36, 0.41, 0.48)));
+                [h.red + (z.red - h.red) * t, h.green + (z.green - h.green) * t, h.blue + (z.blue - h.blue) * t, 1.0]
+            })
+            .collect();
+        sky.insert_attribute(Mesh::ATTRIBUTE_COLOR, cols);
+    }
+    commands.spawn((
+        Mesh3d(meshes.add(sky)),
+        MeshMaterial3d(materials.add(StandardMaterial { unlit: true, fog_enabled: false, cull_mode: None, ..default() })),
+        Transform::IDENTITY,
+        bevy::pbr::NotShadowCaster,
+    ));
     commands.spawn((
         DirectionalLight { illuminance: 4500.0, shadows_enabled: true, ..default() },
         Transform::from_xyz(30.0, 60.0, 20.0).looking_at(Vec3::ZERO, Vec3::Y),
@@ -360,7 +511,9 @@ fn setup_scene(mut commands: Commands, sim: Res<Sim>, mut meshes: ResMut<Assets<
     commands.spawn((
         Camera3d::default(),
         Projection::from(PerspectiveProjection { fov: sim.tuning.fov_deg.to_radians(), near: 0.05, ..default() }),
-        DistanceFog { color: Color::srgb(0.42, 0.46, 0.52), falloff: FogFalloff::Linear { start: 30.0, end: 140.0 }, ..default() },
+        DistanceFog { color: HORIZON, falloff: FogFalloff::Linear { start: 15.0, end: 110.0 }, ..default() },
+        color_grading(),
+        MotionBlur { shutter_angle: 0.0, samples: 8, ..default() },
         Transform::default(),
         PlayerCam,
     ));
@@ -845,8 +998,14 @@ pub fn camera_rotation(m: &Motion) -> Quat {
     t.rotation
 }
 
-fn update_camera(time: Res<Time>, sim: Res<Sim>, st: Res<FxState>, mut cams: Query<(&mut Transform, &mut Projection), With<PlayerCam>>, mut overlay: Query<&mut ImageNode, With<BlinkOverlay>>) {
-    let Ok((mut tf, mut proj)) = cams.single_mut() else { return };
+fn update_camera(
+    time: Res<Time>,
+    sim: Res<Sim>,
+    st: Res<FxState>,
+    mut cams: Query<(&mut Transform, &mut Projection, &mut MotionBlur), With<PlayerCam>>,
+    mut overlay: Query<&mut ImageNode, With<BlinkOverlay>>,
+) {
+    let Ok((mut tf, mut proj, mut blur)) = cams.single_mut() else { return };
     let m = &sim.motion;
     let dir = m.view_dir();
     let eye = to_bevy(m.camera.eye);
@@ -866,6 +1025,9 @@ fn update_camera(time: Res<Time>, sim: Res<Sim>, st: Res<FxState>, mut cams: Que
         let fx = m.blink.fx;
         let a = (fx.blur * 1.8 + fx.distortion * 0.3).clamp(0.0, 1.0);
         img.color = Color::srgba(1.0, 1.0, 1.0, a);
+        // Travel blur: camera motion blur only while Blink's blur is up. Moving forward at Blink
+        // speed, the motion vectors fan out from the centre, giving the game's radial streaking.
+        blur.shutter_angle = (fx.blur * 2.0).clamp(0.0, 1.0);
     }
 }
 

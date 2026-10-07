@@ -449,10 +449,26 @@ format. Formats seen: DXT1, DXT5, ARGB8 and G8. `Textures.tfc` is 1.2 GB, so mip
     `RotOrigin`, minus its `MeshOrigin`.
   - The arm FOV of 75 is vertical; measured against the screenshots, the hand placement only matches that way.
   - The left hand's `Power` socket (`handAttachment_L_jnt`) is where casting effects attach.
+- **Hand effects come from animation notifies.** The `Ply_Powers_as` sequences carry `AnimNotify_PlayParticleEffect`s
+  (in each sequence's `Notifies`: time, notify object). `Powers_Cast_Blink_In` and `Powers_Cast_Blink_Loop` start
+  `Vfx_GamePlay.Powers.Ps_Tattoo_Glow_02` at 0 s, so it re-fires on every 0.33 s loop while targeting.
+  `Powers_Cast_Blink_Out` starts `Ps_Tattoo_Glow_04` at 0.07 s. All of them attach to the `Tattoo` socket
+  (`hand_L_jnt`, on the back of the hand) in the foreground group. Each is a translucent dirt-smoke emitter plus two
+  additive gold `Blink_Glow_02` cards. The swim sequences put `Player_Swimming` on the middle fingers the same way.
+  `dis_data::viewmodel` reads every particle notify generically, and the demo simulates the effects in view space.
+- **Blink travel streaks.** `Twk_Blink.m_pCooldownEffect` is a camera-lens effect whose system is
+  `vrosier_TestFX2.Blink2.Blink_PlayerWind_01`: 12 velocity-aligned glow streaks and 5 soft flashes thrown backwards
+  past the camera. That's the white streaking in screenshots of the travel; the radial blur is the post-process
+  (`m_fMoveBlurMaxStrength` 2.5). The demo uses camera motion blur scaled by Blink's blur parameter, which streaks
+  radially because the camera moves straight ahead.
 - **Layering in the demo.** A base layer (`Sword_Ready_*`, `Sword_Sneak_*`, `Sword_Slide*`, `Empty_Swim*`, mantle and
   landing) and a left-arm layer (`Powers_Idle/Walk/Sprint/Jump`, `Powers_Cast_Blink_In/Loop/Out`,
   `Generic_Powers_Cast_Blink_Travel`) masked to the joints `Powers_Idle` animates, crossfaded over 0.18 s. Skinning is
   done on the CPU and drawn by a second camera on its own render layer, so the arms never clip into walls.
+
+- **Test-course dressing.** The demo textures its boxes with `DishonoredGame.upk` textures read at runtime
+  (`grounds.street_cobbles_01`, `modular_rocks.modular_rock_01`, `wood_plank_01`, diffuse and normal). Unreal normal
+  maps are Y-down, so green is flipped for Bevy.
 
 ## 7. Status and next steps
 

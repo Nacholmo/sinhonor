@@ -18,7 +18,7 @@ range and stepping) is read **at runtime from your own installed copy** of Disho
 | `crates/wwise` | Reader for the Wwise sound packages (AKPK, bank v65); resolves events and converts clips to Ogg |
 | `crates/cascade` | Loads and simulates Unreal Engine 3 Cascade particle systems (with their materials and textures) from the install |
 | `crates/dis_motion` | Engine-agnostic movement and Blink logic. The host game supplies collision through a trait |
-| `crates/sinhonor_demo` | Bevy test level that shows the motion kit in action |
+| `crates/sinhonor_demo` | Bevy test course (dressed with the game's textures) showing the motion kit, Corvo's arms and the Blink effects |
 
 ## Running
 
