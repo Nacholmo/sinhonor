@@ -28,6 +28,8 @@ fn main() {
         return;
     }
     let i = pkg.find_export(&args[1]).expect("export not found");
-    println!("{} : {}", pkg.object_path(ObjRef::Export(i)), pkg.export_class_name(i));
-    show(&pkg.properties(i).expect("properties"), 1);
+    let class = pkg.export_class_name(i);
+    println!("{} : {class}", pkg.object_path(ObjRef::Export(i)));
+    let props = if class == "ScriptStruct" { pkg.struct_defaults(i) } else { pkg.properties(i) };
+    show(&props.expect("properties"), 1);
 }

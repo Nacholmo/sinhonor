@@ -240,6 +240,23 @@ impl Package {
         }
         Err(Error::Unsupported(format!("no property stream in {}", self.object_path(ObjRef::Export(i)))))
     }
+
+    /// Default values of a `ScriptStruct` export. Cooked structs end with their defaults as a
+    /// tagged stream, so this takes the earliest offset whose stream ends exactly at the end of
+    /// the export's data.
+    pub fn struct_defaults(&self, i: usize) -> Result<Vec<Property>> {
+        let data = self.export_data(i);
+        for start in 0..data.len().saturating_sub(8) {
+            let mut r = Reader::new(data);
+            r.seek(start);
+            if let Ok(props) = props::read_tagged(&mut r, self) {
+                if r.remaining() == 0 && !props.is_empty() {
+                    return Ok(props);
+                }
+            }
+        }
+        Err(Error::Unsupported(format!("no struct defaults in {}", self.object_path(ObjRef::Export(i)))))
+    }
 }
 
 struct Header {

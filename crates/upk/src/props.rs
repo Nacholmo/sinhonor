@@ -82,6 +82,9 @@ pub(crate) fn read_tagged(r: &mut Reader, pkg: &Package) -> Result<Vec<Property>
             return Ok(out);
         }
         let type_name = name_at(r, pkg)?;
+        if !type_name.ends_with("Property") {
+            return Err(Error::Unsupported(format!("not a property type: {type_name}")));
+        }
         let size = r.i32()?;
         let array_index = r.i32()?;
         if !(0..1 << 24).contains(&size) || !(0..4096).contains(&array_index) {

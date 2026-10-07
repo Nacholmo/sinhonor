@@ -1,0 +1,9 @@
+[package]
+name = "dis_data"
+description = "Loads Dishonored player-motion and Blink tuning from the user's own install at runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+upk = { path = "../upk" }
