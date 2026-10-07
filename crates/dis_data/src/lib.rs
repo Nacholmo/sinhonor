@@ -8,6 +8,7 @@
 pub mod ini;
 pub mod effects;
 pub mod sounds;
+pub mod surfaces;
 pub mod viewmodel;
 
 use ini::Ini;

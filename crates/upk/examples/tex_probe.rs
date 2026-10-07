@@ -4,6 +4,17 @@ fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
     let pkg = Package::open(&a[0]).unwrap();
     let mi = pkg.find_export(&a[1]).unwrap();
+    if pkg.export_class_name(mi) == "Texture2D" {
+        let dir = std::path::Path::new(&a[0]).parent();
+        let t = pkg.texture_rgba(mi, 1024, dir).expect("decode");
+        println!("{}: {}x{}", a[1], t.width, t.height);
+        if let Some(out) = a.get(2) {
+            let mut f = format!("P7\nWIDTH {}\nHEIGHT {}\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n", t.width, t.height).into_bytes();
+            f.extend_from_slice(&t.pixels);
+            std::fs::write(format!("{out}/{}.pam", a[1].replace('.', "_")), f).unwrap();
+        }
+        return;
+    }
     let p = pkg.properties(mi).unwrap();
     for f in ["TextureParameterValues", "VectorParameterValues", "ScalarParameterValues"] {
         if let Some(Value::Array { count, raw }) = lookup(&p, f) {

@@ -29,7 +29,8 @@ fn main() {
     }
     let t = std::time::Instant::now();
     match dis_data::viewmodel::load_viewmodel(&install) {
-        Ok(vm) => println!(
+        Ok(vm) => {
+            println!(
             "viewmodel in {:?}: arms {} verts (diffuse {:?}, normal {:?}), sword {:?}, {} anims, warnings {:?}",
             t.elapsed(),
             vm.arms.mesh.vertices.len(),
@@ -38,7 +39,15 @@ fn main() {
             vm.sword.as_ref().map(|s| (s.mesh.vertices.len(), s.diffuse.is_some(), s.normal.is_some())),
             vm.anims.len(),
             vm.warnings
-        ),
+        );
+        let mut seqs: Vec<_> = vm.particle_notifies.iter().collect();
+        seqs.sort_by_key(|(k, _)| k.as_str());
+        for (seq, list) in seqs {
+            for n in list {
+                println!("  {seq} @ {:.2}s -> {} at {:?}/{:?}", n.time, n.system.name, n.socket, n.bone);
+            }
+        }
+        }
         Err(e) => println!("viewmodel error: {e}"),
     }
     for w in &snd.warnings {
