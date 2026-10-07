@@ -4,6 +4,7 @@
 //! cargo run --release -p sinhonor_demo -- [--game <Dishonored dir>] [--difficulty easy|normal|hard|veryhard]
 
 mod fx;
+mod hands;
 mod level;
 
 use bevy::audio::{AudioPlayer, AudioSource, PlaybackSettings, Volume};
@@ -30,10 +31,10 @@ fn to_bevy(v: dis_motion::Vec3) -> Vec3 {
 }
 
 #[derive(Resource)]
-struct Sim {
-    motion: Motion,
+pub struct Sim {
+    pub motion: Motion,
     level: Level,
-    tuning: MotionTuning,
+    pub tuning: MotionTuning,
     source: String,
     warnings: usize,
     log: Vec<String>,
@@ -237,6 +238,18 @@ fn main() {
     for w in &sounds.warnings {
         eprintln!("sound warning: {w}");
     }
+    let viewmodel = match dis_data::viewmodel::load_viewmodel(&install) {
+        Ok(vm) => {
+            for w in &vm.warnings {
+                eprintln!("viewmodel warning: {w}");
+            }
+            Some(vm)
+        }
+        Err(e) => {
+            eprintln!("viewmodel not loaded: {e}");
+            None
+        }
+    };
     let effects = dis_data::effects::load_effects(&install);
     for w in &effects.warnings {
         eprintln!("effect warning: {w}");
@@ -276,7 +289,11 @@ fn main() {
 
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window { title: "sinhonor — Dishonored motion kit".into(), ..default() }),
+            primary_window: Some(Window {
+                title: "sinhonor — Dishonored motion kit".into(),
+                resolution: bevy::window::WindowResolution::new(1600.0, 900.0),
+                ..default()
+            }),
             ..default()
         }))
         .insert_resource(sim)
@@ -284,10 +301,11 @@ fn main() {
         .insert_resource(sfx)
         .insert_resource(fx::FxWorld::new(effects))
         .insert_resource(FxState::default())
+        .insert_resource(hands::HandsAsset(std::sync::Mutex::new(viewmodel)))
         .insert_resource(ClearColor(Color::srgb(0.42, 0.46, 0.52)))
         .insert_resource(AmbientLight { color: Color::srgb(0.75, 0.8, 0.9), brightness: 250.0, ..default() })
-        .add_systems(Startup, (setup_scene, load_audio, grab_cursor.run_if(|a: Res<Autopilot>| a.steps.is_empty())))
-        .add_systems(Update, (cursor_toggle, gather_look, simulate, play_sounds, fx_triggers, update_camera, fx::update_fx, draw_blink, update_hud).chain())
+        .add_systems(Startup, (setup_scene, load_audio, hands::setup_hands, grab_cursor.run_if(|a: Res<Autopilot>| a.steps.is_empty())))
+        .add_systems(Update, (cursor_toggle, gather_look, simulate, play_sounds, fx_triggers, update_camera, hands::update_hands, fx::update_fx, draw_blink, update_hud).chain())
         .run();
 }
 
@@ -812,6 +830,21 @@ fn push_log(sim: &mut Sim, s: String) {
 }
 
 
+/// The game's 75° is used as the vertical angle: measured against in-game screenshots, the
+/// first-person hands land where the game draws them only with a vertical 75° (Hor+ at any
+/// width), not with a horizontal one.
+pub fn vertical_fov(fov_deg: f32, _aspect: f32) -> f32 {
+    fov_deg.to_radians()
+}
+
+/// The player camera's rotation in Bevy space (view direction plus lean/bob roll).
+pub fn camera_rotation(m: &Motion) -> Quat {
+    let dir = m.view_dir();
+    let mut t = Transform::IDENTITY.looking_to(Vec3::new(dir.x, dir.z, dir.y), Vec3::Y);
+    t.rotate_local_z(-m.camera.roll);
+    t.rotation
+}
+
 fn update_camera(time: Res<Time>, sim: Res<Sim>, st: Res<FxState>, mut cams: Query<(&mut Transform, &mut Projection), With<PlayerCam>>, mut overlay: Query<&mut ImageNode, With<BlinkOverlay>>) {
     let Ok((mut tf, mut proj)) = cams.single_mut() else { return };
     let m = &sim.motion;
@@ -827,7 +860,7 @@ fn update_camera(time: Res<Time>, sim: Res<Sim>, st: Res<FxState>, mut cams: Que
         tf.rotate_local_y(k * 0.6 * (t * 1.3).cos());
     }
     if let Projection::Perspective(p) = &mut *proj {
-        p.fov = m.camera.fov_deg.to_radians();
+        p.fov = vertical_fov(m.camera.fov_deg, p.aspect_ratio);
     }
     if let Ok(mut img) = overlay.single_mut() {
         let fx = m.blink.fx;
@@ -866,7 +899,7 @@ fn update_hud(sim: Res<Sim>, mut hud: Query<&mut Text, With<Hud>>) {
     }
     if sim.show_help {
         s.push_str(&format!(
-            "\nWASD move  Mouse look  Space jump/mantle  Ctrl/C crouch (sprint+crouch = slide)\nShift sprint  Alt walk  Q/E lean  RMB/F hold Blink, release to go  1/2 Blink tier\nR reset  M mute  G blink gizmos  F1 help  Esc free cursor / quit\n\nTuning read from {}\n{} warnings; run speed {:.0}, sprint {:.0}, jump {:.0}, gravity {:.0}",
+            "\nWASD move  Mouse look  Space jump/mantle  Ctrl/C crouch (sprint+crouch = slide)\nShift sprint  Alt walk  Q/E lean  RMB/F hold Blink, release to go  1/2 Blink tier\nR reset  M mute  G blink gizmos  H hands  F1 help  Esc free cursor / quit\n\nTuning read from {}\n{} warnings; run speed {:.0}, sprint {:.0}, jump {:.0}, gravity {:.0}",
             sim.source, sim.warnings, sim.tuning.run_speed, sim.tuning.sprint_speed, sim.tuning.jump_z, sim.tuning.gravity_z
         ));
     }

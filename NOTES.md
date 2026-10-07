@@ -80,8 +80,8 @@ apply to anything copied.
 - **Animation.** Cooked `UAnimSequence`s store a **Sony Edge Animation** blob (PS3 SPU format, tag `"50AE"`,
   compression format id 7), and every `USkeletalMesh` carries an Edge skeleton blob (tag `"30SE"`). Joint *i* of the Edge
   skeleton equals UE bone *i*. Key data is big-endian and bit-packed. This is why umodel can't play Dishonored animations.
-  The layout is described in prose in `dishonoredrecompiled/resources/docs/edgeanim.md`. A Rust decoder would need a clean
-  implementation from that description.
+  The layout is described in prose in `dishonoredrecompiled/resources/docs/edgeanim.md`. `crates/edge_anim` is a clean
+  implementation from that description (§6d).
 
 ## 4. Findings from the local install (2026-10-06)
 
@@ -418,17 +418,53 @@ format. Formats seen: DXT1, DXT5, ARGB8 and G8. `Textures.tfc` is 1.2 GB, so mip
 - **Travel screen effect.** The game uses a radial blur with a dark tunnel vignette. The demo has a vignette driven by
   Blink's blur and distortion parameters; the radial blur needs a post-process pass.
 
+## 6d. First-person arms, sword and animation (2026-10-07)
+
+- **Where.** The arms are `Engine.upk` `Ply_Player.Skm_Player` (one material, `D_Diffuse` and `N_Normals` at 2048²
+  only, so the reader decodes the top mip and box-halves it). The sword is `Startup.upk` `Wpn_PlySwords.Wpn_PlySword01`.
+  The first-person `AnimSet`s (`Ply_*`) are in `Startup.upk`: 385 sequences decode in about 100 ms.
+- **Skeletal mesh layout (v801/30), as far as LOD 0 needs.** After the tagged properties: user bounds (bone name,
+  offset vector, radius), the bounds, the material list, `MeshOrigin`, `RotOrigin`, the Edge skeleton as a byte array,
+  then the reference bones (name, flags, quaternion, position, child count, parent, colour). Per LOD: sections (material,
+  chunk, first index, triangle count, one byte), a 16-bit index buffer, used bones, chunks (first vertex, rigid and soft
+  vertex arrays that are empty when cooked, a chunk-local bone map, counts), sizes, required bones, a raw-points bulk
+  record, then the GPU skin buffer. Its vertices are 8 bytes of packed tangent and normal, 4 bone indices (chunk-local),
+  4 weights, a float position and half-float UVs.
+- **Edge animation, as implemented in `crates/edge_anim`.** Little-endian header with a 16-bit header size at byte 12
+  and 16-bit counts after it (joints, frames, frame sets, evaluation buffer, then constant and animated channel counts
+  for rotation, translation, scale and user channels). The 32-bit offsets that follow are relative to the field that
+  holds them. Channel tables (joint indices) sit after a fixed 96-byte header, padded to 8 bytes for constant rotations
+  and 4 for the rest. Constant rotations are 48-bit packed quaternions (three components, the largest dropped).
+  Animated channels are stored in frame sets: each has a base frame, an "intra" frame count and a DMA-style size and
+  offset. Inside a set, keyframe values are bit-packed per channel with a per-channel packing spec (sign, exponent and
+  mantissa widths), the bit stream is big-endian and MSB-first, and intra frames are flagged per channel. Joints are
+  matched to the skeleton by name hash (the skeleton has hashes, parents and a base pose that equals the UE bind pose).
+  Additive sequences add on top of the base pose. Facts came from the prose write-up in dishonoredrecompiled (see the
+  provenance caveat in §2); no code was copied, and the decoder was checked by evaluating poses against the bind pose.
+- **Conventions that took measurement.**
+  - Bone quaternions are used as stored with glam's `q * v` (no W flip).
+  - Rotator to matrix: `Rz(yaw) * Ry(-pitch) * Rx(-roll)`, 65536 units per turn.
+  - The view is the `camera_jnt` bone: +X up, +Y right, -Z forward. The demo maps its +X to Bevy's +Y, +Y to +X.
+  - The sword sits at `handAttachment_R_jnt` × socket `RightHandWpn` (rotator `[0, 16384, 0]`) × the sword's own
+    `RotOrigin`, minus its `MeshOrigin`.
+  - The arm FOV of 75 is vertical; measured against the screenshots, the hand placement only matches that way.
+  - The left hand's `Power` socket (`handAttachment_L_jnt`) is where casting effects attach.
+- **Layering in the demo.** A base layer (`Sword_Ready_*`, `Sword_Sneak_*`, `Sword_Slide*`, `Empty_Swim*`, mantle and
+  landing) and a left-arm layer (`Powers_Idle/Walk/Sprint/Jump`, `Powers_Cast_Blink_In/Loop/Out`,
+  `Generic_Powers_Cast_Blink_Travel`) masked to the joints `Powers_Idle` animates, crossfaded over 0.18 s. Skinning is
+  done on the CPU and drawn by a second camera on its own render layer, so the arms never clip into walls.
+
 ## 7. Status and next steps
 
 Done: `upk` (package, texture reader), `dis_data` (tuning, sound and effect loader), `dis_motion` (motion core and
-Blink, tests), `wwise` (sound packages), `cascade` (particle runtime), and `sinhonor_demo` (Bevy course with sounds,
+Blink, tests), `wwise` (sound packages), `cascade` (particle runtime), `edge_anim` (Edge animation decoder), and `sinhonor_demo` (Bevy course with Corvo's animated arms and sword, sounds,
 the game's particle effects, and `--autopilot` verification routes).
 
 Next:
 1. Trace the native mantle edge finder (`DishonoredMantleEdgeFinderComponent`, the player-pawn ledge result at `+0x898`)
    and the Slide and Leaning states. Replace the models above.
 2. Agility: `StatePlayerMasterJump` style variants and the `Attribute_*_PowerJump*` modifiers in `DefaultPlayer.ini`.
-3. Edge animation decoder, so camera bob and mantle camera motion come from the game's camera animations.
+3. Drive camera bob and mantle camera motion from the game's camera animations (the Edge decoder now exists).
 4. Static-mesh import for mesh particle emitters (Blink swirls, slide debris); SubUV flipbooks; Blink's screen
    post-process material (`BlinkDistancePercentage` and the other parameters) instead of the demo's tint.
 5. A host adapter example: dropping `dis_motion` into another Rust game, in the mashup style.

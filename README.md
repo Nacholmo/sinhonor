@@ -12,8 +12,9 @@ range and stepping) is read **at runtime from your own installed copy** of Disho
 
 | crate | what it does |
 |---|---|
-| `crates/upk` | Reader for Dishonored's UE3 packages: LZO chunk flattening, name/import/export tables, tagged properties |
-| `crates/dis_data` | Finds your install and loads the motion and Blink tuning from its packages and INI files |
+| `crates/upk` | Reader for Dishonored's UE3 packages: LZO chunk flattening, name/import/export tables, tagged properties, textures, skeletal meshes |
+| `crates/edge_anim` | Decoder for the Sony Edge animation format Dishonored cooks its animations in |
+| `crates/dis_data` | Finds your install and loads the motion and Blink tuning, sounds, effects and first-person arms from it |
 | `crates/wwise` | Reader for the Wwise sound packages (AKPK, bank v65); resolves events and converts clips to Ogg |
 | `crates/cascade` | Loads and simulates Unreal Engine 3 Cascade particle systems (with their materials and textures) from the install |
 | `crates/dis_motion` | Engine-agnostic movement and Blink logic. The host game supplies collision through a trait |
@@ -40,6 +41,7 @@ which of Corvo's attribute sets is used.
 | 1 / 2 | Blink tier I / II |
 | M | mute game sounds |
 | G | Blink debug gizmos (target footprint and ground line) |
+| H | show or hide Corvo's arms and sword |
 | R / F1 / Esc | reset / help / free cursor (again to quit) |
 
 Sound effects (footsteps per surface, landings, mantle, slide, Blink and more) are decoded at startup from

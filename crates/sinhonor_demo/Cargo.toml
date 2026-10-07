@@ -11,3 +11,5 @@ dis_data = { path = "../dis_data" }
 dis_motion = { path = "../dis_motion" }
 glam.workspace = true
 cascade = { path = "../cascade" }
+edge_anim = { path = "../edge_anim" }
+upk = { path = "../upk" }
