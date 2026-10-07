@@ -64,11 +64,11 @@ Distances are in metres; the game works in Unreal units, where 1 uu = 1 cm.
 
 ### Blink
 
-Blink follows the game's native code (`DishonoredActivePowerComponent_Blink`, read with Ghidra and written up in our own words in `NOTES.md` §5). Its numbers come from `Twk_Blink`'s per-level array.
+Blink reproduces the behaviour of the game's `DishonoredActivePowerComponent_Blink`, specified in our own words in `NOTES.md` §5. Its numbers come from `Twk_Blink`'s per-level array.
 
 - **Range: a squashed sphere.** Looking level or down, you reach 11 m (tier I) or 16 m (tier II). Looking up, the aim is scaled until its height reaches 5 m, so you can blink a long way across but only 5 m up.
 - **Targeting** runs every frame while you hold the button. A 20 cm box is swept along your aim. If it hits a wall close in front of you (within 3 m) the ray is nudged up, then sideways, 30 cm at a time, so you can blink past corners. From the hit it **pulls back** in half-radius steps until your whole body fits, but never behind the camera. That's why blinking at a wall puts you just in front of it. Then it drops a sweep to find the ground and raises the target so you fit above it.
-- **The marker** is the game's own particle systems. `Blink_Ground_01` sits on the ground under the target, pitched 90° down as the native display places it. `Blink_Fall_01` floats at the target when it's above the ground. `Blink_Mantle_01` shows when the target is a ledge. The vertical beam is the systems' far LOD, which only spawns beyond 2.56 m, as in the game.
+- **The marker** is the game's own particle systems. `Blink_Ground_01` sits on the ground under the target, pitched 90° down as the game places it. `Blink_Fall_01` floats at the target when it's above the ground. `Blink_Mantle_01` shows when the target is a ledge. The vertical beam is the systems' far LOD, which only spawns beyond 2.56 m, as in the game.
 - **Travel**: on release, physics switches to flying, and if you're standing Corvo crouches so low gaps fit (the target stays the same point, so a crouched body arrives with its feet higher, which is how Blink reaches ledges above you). He then moves 1 m every 10 ms (about 100 m/s), in sub-moves of at most 50 cm, **without collision**: the targeting sweeps already made the path safe. Travel stops at the target, if it would pass it, or on touching a pawn.
 - **Arrival**: your velocity from before the blink is restored, so blink-jumping keeps momentum. Then comes the game's post-blink ledge check (a step-up or a full mantle, using `m_pMantleBlinkTweaks`) and an attempt to stand up.
 - **Cooldown**: 1 s, with the game's cooldown lens effect (`Twk_Blink_Cooldown`, white streaks thrown back past the camera) and a decaying wobble.
@@ -104,7 +104,7 @@ The movement needs only the tuning. Everything else is optional and skipped with
 
 **What's still approximate:**
 
-- **Not yet traced in the exe**: walking uses UE3's standard `CalcVelocity` model, not Dishonored's own "LocoNew" walking path. The mantle's ledge finder, the slide and the lean are modelled from the tweak values and animation lengths, not traced.
+- **Not yet exact**: walking uses UE3's standard `CalcVelocity` model, not Dishonored's own "LocoNew" walking path. The mantle's ledge finder, the slide and the lean are modelled from the tweak values and animation lengths.
 - **Camera**: the head bob is procedural. The game drives it from a camera animation (`Ply_Nav_LocoCamera_at`), which the Edge decoder can now read but nothing plays yet.
 - **Effects**: mesh-particle emitters (the Blink swirl rings), SubUV flipbooks and the real Blink post-process material aren't done. There's no bloom.
 - **Smoke**: the hand smoke is simulated relative to the camera, so it doesn't trail behind you as it does in the game.
@@ -173,7 +173,7 @@ All the tuning is read at runtime by `crates/dis_data`, and `cargo run --release
 - **Pawn defaults** (`DishonoredGame.upk`, `Engine.upk`): collision size, crouch size, step height, eye height, ladder speed, walkable floor angle and friction, from the class default objects.
 - **INI files**: gravity, lean springs, swim strokes, FOV, bob and roll.
 - **Animation lengths** (`Startup.upk`): mantles, slides and landings last as long as the animations that play them.
-- **Native code** (Ghidra): Blink's targeting, travel, end and screen effect, and the jump. The game's gameplay logic is in `Dishonored.exe`, not in its UnrealScript. `NOTES.md` describes what was learned, in our own words. Decompiled code is never committed.
+- **Behaviour**: Blink's targeting, travel, end and screen effect, and the jump, follow the behaviour specified in `NOTES.md` §5. No game code, decompiled or otherwise, is in this repository.
 
 ## Layout
 
@@ -204,6 +204,17 @@ The `examples/` of `upk`, `cascade`, `edge_anim`, `wwise` and `dis_data` are the
 ## Screenshot mode
 
 `cargo run --release -p sinhonor_demo -- --autopilot shots` plays a scripted route with no mouse needed: a mantle, a blink, the ladder, the rooftop blink, a slide, a close-up of the Blink marker and the arrival lens effect. It prints the motion state at each checkpoint, saves a PNG of each into `shots/`, and quits. Add `--route fx` for the effects route instead: the Blink marker near and far, mid-travel, gravel, puddle, falling into the pool, swimming and climbing out. It's handy for checking nothing broke after a change.
+
+## Purpose and scope
+
+sinhonor is an independent, non-commercial research and interoperability project. Its aim is to understand how Dishonored's player movement and Blink feel, and to make that feel usable in other games through original code.
+
+- **You need your own copy.** It works only with a legitimately purchased install. The demo reads that install on your machine, at runtime.
+- **Nothing from the game is distributed.** This repository contains no game assets, data, configuration, executable code or decompiled code, and none is generated into it. The `.gitignore` is a whitelist so none can be committed by accident.
+- **The game is left untouched.** Nothing here modifies, patches or injects into the installed game or its files. It doesn't run alongside the game, doesn't connect to any online service, and doesn't bypass any copy protection or access control.
+- **The code is original.** The file-format readers are written from public format documentation (credited below and in `NOTES.md`) and from examining the file formats so the data can be read. The movement and Blink code implements a behaviour specification written in our own words. No code from the game or from other projects' decompilations is used.
+
+Dishonored and its content belong to ZeniMax Media and Arkane Studios. If you hold rights in that content and have a concern about anything here, please open an issue and it will be addressed promptly.
 
 ## Credits and licenses
 

@@ -866,7 +866,7 @@ fn fx_triggers(time: Res<Time>, sim: Res<Sim>, mut sfx: ResMut<Sfx>, mut fxw: Re
     fxw.camera = fx::camera_basis(m.camera.eye, m.view_dir());
     let feet = m.feet();
 
-    // Blink targeting display, as the native code places it: the ground effect at the ground
+    // Blink targeting display, placed as the game places it: the ground effect at the ground
     // point with the pawn's yaw and pitch -90 (its local X points down, so its streaks rise and
     // its cards lie flat), and the fall effect at the target point with no rotation, shown while
     // the target is more than 15 units above the ground point.

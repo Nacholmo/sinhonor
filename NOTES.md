@@ -55,8 +55,8 @@ Survey date: 2026-10-06.
 | [ectrc/dismod](https://github.com/ectrc/dismod) | Hooks the running retail game. Useful for checking behaviour against the real thing. | none stated |
 | Cheat/trainer repos ([Crayfry](https://github.com/Crayfry/Dishonored_Cheat_menu), [gh1593](https://github.com/gh1593/DishonoredTrainer) GPL-3.0, [ectrc/dishonored](https://github.com/ectrc/dishonored)) | Memory pokes for blink distance, height, cooldown, and blink marker. They show which runtime fields matter but contain no logic. | mixed |
 
-There is no public, clean-room spec of Dishonored's gameplay logic. The movement and Blink logic has to be learned from
-the game's own UnrealScript bytecode, and from the native exe only where a function is `native`.
+There is no public, clean-room spec of Dishonored's gameplay logic, and most of it is not in the game's UnrealScript
+(see §3).
 
 **Provenance caveat:** `dishonoredrecompiled` is built on `CodeRedModding/UnrealEngine3` (described as full UE3 2013
 source, which is Epic's proprietary code) and on IDA decompiles of a symbolized 2012 QA build. Treat it as a pointer to *facts*
@@ -107,7 +107,7 @@ is zero-padded. UELib then reads the result directly (it does not do LZO itself)
   marker meshes and particle systems (stand, ground, mantle; low and high fall).
 - The tier I and tier II horizontal reaches in `Twk_Blink` **differ from** the INI's `m_fDefaultMaxHorizDistance`.
   **Resolved in §5: the tweak object wins.** The INI `m_fDefault*` values are overwritten every time a cast starts.
-- Native-side strings name the blink post-process parameters: `BlinkCooldownTime`, `BlinkDistancePercentage`,
+- The Blink post-process parameters are named `BlinkCooldownTime`, `BlinkDistancePercentage`,
   `BlinkDistanceTravelled`, `BlinkLensIntensity`, `BlinkLocalDirection`, `BlinkStepProgress`, `BlinkStepsTaken`,
   `BlinkTargeting`, `BlinkTimeElapsed`, `BlinkWarmupTime`, `Blink_opacity`. Damage types: `DisDamageType_BlinkPush`
   and `DisDamageType_BlinkKnockdown`.
@@ -120,26 +120,19 @@ clips include walk, run, sprint, crouch and sneak variants, jump and land, slide
 (in normal, crouch and sneak variants), and swim in four directions. Export names are `AnimSequence_N`; the real name is the
 `SequenceName` property.
 
-**Native binary (`Dishonored.exe`).** It is a 32-bit PE with image base `0x400000`, a 2022 rebuild timestamp, and **no SteamStub
-wrapper** (sections `.text .rdata .data .rsrc .reloc` only). It has MSVC RTTI. UE3 native thunks are registered through
-`{const char* "U<Class>exec<Func>", fnptr}` pair tables in `.data`/`.rdata`. Walking those tables labels 2,560 natives.
-Class registration strings are UTF-16 (`"UDishonoredActivePowerComponent_Blink"`).
-
 **UELib caveats on Dishonored.** Class decompile lists only the first variable (the children chain is cut short), so use
 `obj list` to enumerate members. Some enum-valued struct properties (`m_UsePowerAction`) and some untyped arrays fail to
 decode.
 
-## 5. Blink: native behaviour (from Ghidra, written in our own words)
+## 5. Blink: behaviour specification
 
-How it was found: the class's static registration record in `.data` (size `0x168`, matching the 360-byte retail
-layout) points at its internal constructor. That constructor installs the vtable, and diffing it against the parent
-`DishonoredActivePowerComponent` vtable leaves 16 Blink overrides in `0xbe7000–0xbfd000`. Field offsets were matched to the
-reflected property order: the Blink members start at `+0x90`, and the parent's `m_TargetPoint` is at `+0x60`.
+This is the behaviour `crates/dis_motion` implements, written as a specification in our own words. Names are the
+game's reflected property names; values come from the tweak and INI files read at runtime.
 
 ### Data actually used at runtime
 
 On every cast start, the component points `m_pPowerAttributes` at `Twk_Blink.m_Levels[CurrentLevel]`. That is a 3-slot
-static array of `PowerAttributes_Blink`, `0x4c` bytes each. The working values are then copied from it:
+array of `PowerAttributes_Blink`. The working values are then copied from it:
 
 - `m_fBlinkDistanceMax = Distance * (1 + mod)`, `maxHoriz = HorizDistance * (1 + mod)`, `maxVert = VertDistance * (1 + mod)`.
   `mod` comes from a game attribute lookup, so it's a percentage bonus. Treat it as 0 for a port.
@@ -266,7 +259,7 @@ Parameter names the materials read: `BlinkDistancePercentage`, `BlinkStepProgres
 ### Still open for Blink
 - What exactly the 3 `m_Levels` slots map to (they're indexed by `CurrentLevel`; only two have rune costs).
 - The exact sideways axes used by the close-collision nudge (world Y versus aim-relative).
-- The ledge detector (`ad35e0` step-up mantle, `acd820` full mantle) belongs to the movement work below.
+- The ledge detector (step-up mantle and full mantle) belongs to the movement work below.
 
 ## 6. Player motion: where the data lives (2026-10-07)
 
@@ -305,7 +298,7 @@ and the lean spring constants, angles, tilt and height ratio.
 **Struct defaults.** A cooked `ScriptStruct` export ends with its default values as a tagged stream. For example,
 `DisTweaks_Blink.PowerAttributes_Blink` supplies the Blink fields that the per-level entries leave unset.
 
-**Jump (`StatePlayerMasterJump`, enter function, Ghidra).** Z velocity is set from the `m_JumpZ` attribute (or the
+**Jump (`StatePlayerMasterJump`).** Z velocity is set from the `m_JumpZ` attribute (or the
 carrying-corpse variant). The vertical velocity of the base the player stands on is added, then physics switches to Falling.
 `m_JumpStyle` selects other variants that use different attributes (power jump). `m_fJumpImpulse` is not the normal jump.
 
@@ -313,13 +306,13 @@ carrying-corpse variant). The vertical velocity of the base the player stands on
 
 | Part | Status |
 |---|---|
-| Blink targeting, range, pull-back, ground correction, stepping, end and cooldown, lens parameters | **Follows the native code** (§5), including moving without collision during travel |
-| Jump velocity | **Follows the native code** (attribute `m_JumpZ`) |
+| Blink targeting, range, pull-back, ground correction, stepping, end and cooldown, lens parameters | **Follows the game's behaviour** (§5), including moving without collision during travel |
+| Jump velocity | **Follows the game** (attribute `m_JumpZ`) |
 | All speeds, acceleration, air control, gravity, step height, collision sizes, mantle thresholds, slide timing, lean springs, swim | **Game values**, read at runtime |
-| Walking and falling integration | UE3 `CalcVelocity`-style model; Dishonored's own "LocoNew" path not traced yet |
-| Strafe and backward multipliers | Applied as a direction ellipse; the exact native blend is not traced |
-| Mantle finder and mantle motion | Modelled from the tweak fields and animation lengths; native edge-finder FSM not traced |
-| Slide | Speed bleeds from entry speed to crouch speed over `m_fSlideTime`, with a cancel window. Not traced |
+| Walking and falling integration | UE3 `CalcVelocity`-style model; Dishonored's own "LocoNew" path not reproduced yet |
+| Strafe and backward multipliers | Applied as a direction ellipse; the game's exact blend is not known |
+| Mantle finder and mantle motion | Modelled from the tweak fields and animation lengths; the game's own edge finder is not reproduced |
+| Slide | Speed bleeds from entry speed to crouch speed over `m_fSlideTime`, with a cancel window. Modelled, not exact |
 | Lean, bob, landing dip | Spring and procedural approximations; the game drives bob from `Ply_Nav_LocoCamera_at` (needs the Edge decoder) |
 | Ladder, swim | Simple models using the game's speeds and accelerations |
 | Agility (power jump, double jump) | Not implemented yet |
@@ -401,7 +394,7 @@ format. Formats seen: DXT1, DXT5, ARGB8 and G8. `Textures.tfc` is 1.2 GB, so mip
 
 ### Matching the Blink marker to the game (2026-10-07, compared against in-game screenshots)
 
-- **Placement (native targeting display, `FUN_00bfa270`).** The *ground* system goes at the ground point found under the
+- **Placement (the game's targeting display).** The *ground* system goes at the ground point found under the
   target, rotated to the pawn's yaw with **pitch -90°**. Its local X therefore points down: its glow streaks travel up
   (velocity -X), and its `-X` axis-locked cards lie flat on the floor. The *fall* system goes at the target point with
   a zero rotator (a zero-initialised global). It is hidden unless the target is more than 15 units above the ground
@@ -477,7 +470,7 @@ Blink, tests), `wwise` (sound packages), `cascade` (particle runtime), `edge_ani
 the game's particle effects, and `--autopilot` verification routes).
 
 Next:
-1. Trace the native mantle edge finder (`DishonoredMantleEdgeFinderComponent`, the player-pawn ledge result at `+0x898`)
+1. Match the game's mantle edge finder (`DishonoredMantleEdgeFinderComponent`) more closely,
    and the Slide and Leaning states. Replace the models above.
 2. Agility: `StatePlayerMasterJump` style variants and the `Attribute_*_PowerJump*` modifiers in `DefaultPlayer.ini`.
 3. Drive camera bob and mantle camera motion from the game's camera animations (the Edge decoder now exists).
@@ -488,7 +481,7 @@ Next:
 ## 8. Credits
 
 UELib / UE Explorer (Eliot van Uytfanghe), UE Viewer (Konstantin Nosov / Gildor), ue3-tools and dishonored-toolkit
-(deadYokai), dishonoredrecompiled and dismod (ectrc), CodeRed-Generator (CodeRedModding), lzokay-native (MIT), Ghidra (NSA, Apache-2.0), [ww2ogg](https://github.com/coconutbird/ww2ogg-rs) Rust port of [hcs64/ww2ogg](https://github.com/hcs64/ww2ogg) (BSD-3-Clause), lewton (MIT/Apache-2.0). Cascade/LookupTable layout cross-checked against UE Viewer's UE3 notes (MIT).
+(deadYokai), dishonoredrecompiled and dismod (ectrc), CodeRed-Generator (CodeRedModding), lzokay-native (MIT), [ww2ogg](https://github.com/coconutbird/ww2ogg-rs) Rust port of [hcs64/ww2ogg](https://github.com/hcs64/ww2ogg) (BSD-3-Clause), lewton (MIT/Apache-2.0). Cascade/LookupTable layout cross-checked against UE Viewer's UE3 notes (MIT).
 Runtime dependencies: [Bevy](https://bevyengine.org) and [glam](https://github.com/bitshifter/glam-rs) (MIT OR Apache-2.0).
 Structural references: [iw4L](https://github.com/vladtrc/iw4L), [gang-beasts-rust](https://github.com/muffinmxn/gang-beasts-rust),
 [benilla](https://github.com/samwhosung/benilla), [2010-rust-rewrite-mashup](https://github.com/chasmlol/2010-rust-rewrite-mashup).

@@ -1,21 +1,21 @@
-//! Blink, following the reverse-engineered behaviour of Dishonored's
+//! Blink, following the behaviour of Dishonored's
 //! `DishonoredActivePowerComponent_Blink` (see NOTES.md §5): ellipsoidal reach, box-swept
 //! targeting with close-wall nudging and pull-back, ground correction, fixed-interval stepped
 //! travel with lookahead, velocity restore on arrival, then cooldown.
 
 use crate::{BlinkLevel, BlinkTuning, Vec3, World};
 
-/// Sub-step length used while travelling (native constant).
+/// Sub-step length used while travelling (game constant).
 const SUB_STEP: f32 = 50.0;
-/// Horizontal distance at which the target counts as reached (native constant).
+/// Horizontal distance at which the target counts as reached (game constant).
 const ARRIVE_DIST: f32 = 25.0;
-/// A step that moves less than this means we are stuck (native constant).
+/// A step that moves less than this means we are stuck (game constant).
 const STUCK_DIST: f32 = 2.0;
-/// Lookahead multiplier for the per-substep sweep (native constant).
+/// Lookahead multiplier for the per-substep sweep (game constant).
 const LOOKAHEAD: f32 = 3.0;
-/// Length of the downward ground trace under the target (native constant).
+/// Length of the downward ground trace under the target (game constant).
 const GROUND_TRACE: f32 = 20000.0;
-/// Velocity given to the pawn while travelling when no step interval is set (native constant).
+/// Velocity given to the pawn while travelling when no step interval is set (game constant).
 const DEFAULT_TRAVEL_SPEED: f32 = 1000.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

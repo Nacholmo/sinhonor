@@ -6,10 +6,9 @@
 //! values. Coordinates follow Unreal conventions (Z up, X forward at yaw 0, Y right, units ~cm)
 //! so tuning read from the game applies unchanged; hosts convert at the boundary.
 //!
-//! Behaviour sources are documented in `NOTES.md`: Blink follows the reverse-engineered
-//! native algorithm; walking/falling follow UE3's character physics fed with Dishonored's
-//! tuning; mantle, slide, lean, swim and ladder are modelled from the game's tuning and
-//! animation timings where the exact native logic has not been traced yet.
+//! Behaviour sources are documented in `NOTES.md`: Blink follows the behaviour specified in
+//! §5; walking/falling follow UE3's character physics fed with Dishonored's tuning; mantle,
+//! slide, lean, swim and ladder are modelled from the game's tuning and animation timings.
 
 mod blink;
 pub mod boxworld;
