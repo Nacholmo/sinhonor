@@ -1,69 +1,151 @@
 # sinhonor
 
-A portable Rust **motion kit** built from Dishonored (2012): the player's movement
-(walk, sprint, crouch, jump, fall, slide, mantle, lean, swim, ladder) and the motion powers
-(Blink, Agility), packaged so they can be dropped into other games. It's modelled on how
-[2010-rust-rewrite-mashup](https://github.com/chasmlol/2010-rust-rewrite-mashup) brings Skate 3 into MW2.
+Dishonored's first-person movement and Blink in Rust, with a Bevy test course to try them in.
 
-**No game files ship with this repository.** All tuning (speeds, jump, mantle heights, Blink
-range and stepping) is read **at runtime from your own installed copy** of Dishonored.
+It isn't a rewrite of the game. It's a portable **motion kit**: walk, sprint, crouch, jump, fall, slide, mantle, lean, swim, ladder and Blink, built the way [2010-rust-rewrite-mashup](https://github.com/chasmlol/2010-rust-rewrite-mashup) brings Skate 3 into MW2. The movement lives in its own crate, `crates/dis_motion`, which only depends on `glam`. It knows nothing about Bevy, so the same controller can be dropped into any game that can answer a box sweep.
 
-## Layout
+**No game files ship with this repository.** Every number, sound, effect, texture, mesh and animation is read at startup **from your own installed copy** of Dishonored.
 
-| crate | what it does |
-|---|---|
-| `crates/upk` | Reader for Dishonored's UE3 packages: LZO chunk flattening, name/import/export tables, tagged properties, textures, skeletal meshes |
-| `crates/edge_anim` | Decoder for the Sony Edge animation format Dishonored cooks its animations in |
-| `crates/dis_data` | Finds your install and loads the motion and Blink tuning, sounds, effects and first-person arms from it |
-| `crates/wwise` | Reader for the Wwise sound packages (AKPK, bank v65); resolves events and converts clips to Ogg |
-| `crates/cascade` | Loads and simulates Unreal Engine 3 Cascade particle systems (with their materials and textures) from the install |
-| `crates/dis_motion` | Engine-agnostic movement and Blink logic. The host game supplies collision through a trait |
-| `crates/sinhonor_demo` | Bevy test course (dressed with the game's textures) showing the motion kit, Corvo's arms and the Blink effects |
+## Run it
 
-## Running
+You need Rust (https://rustup.rs) and Dishonored installed. From this folder:
 
 ```
-cargo run --release -p sinhonor_demo -- --game "/path/to/steamapps/common/Dishonored"
+cargo run --release -p sinhonor_demo
 ```
 
-`--game` defaults to the `DISHONORED_DIR` environment variable, then to common Steam library paths
-(including extra libraries listed in `libraryfolders.vdf`). `--difficulty easy|normal|hard|veryhard` selects
-which of Corvo's attribute sets is used.
+The first build takes a few minutes (Bevy is big); after that it's quick.
 
-| Key | Action |
+**Finding the install.** It uses `--game "<path to steamapps/common/Dishonored>"` if you give it, then the `DISHONORED_DIR` environment variable, then common Steam library paths, including the extra libraries listed in Steam's `libraryfolders.vdf`. `--difficulty easy|normal|hard|veryhard` picks which of Corvo's attribute sets is used (Normal by default).
+
+On Linux the demo runs natively on Wayland with a real pointer lock. Under X11 the cursor is confined and re-centred instead.
+
+## Controls
+
+| Action | Keyboard / mouse |
 |---|---|
-| WASD / mouse | move / look |
-| Space | jump, or mantle when a ledge is in reach |
-| Ctrl or C | crouch toggle; while sprinting: slide |
-| Shift / Alt | sprint / slow walk |
-| Q / E | lean |
-| Right mouse or F | hold to aim Blink, release to go |
-| 1 / 2 | Blink tier I / II |
-| M | mute game sounds |
-| G | Blink debug gizmos (target footprint and ground line) |
-| H | show or hide Corvo's arms and sword |
-| R / F1 / Esc | reset / help / free cursor (again to quit) |
+| Move / look | WASD / mouse |
+| Jump, or mantle when a ledge is in reach | Space |
+| Crouch (toggle, like the game's default binding) | Ctrl or C |
+| Slide | Crouch while sprinting |
+| Sprint / slow walk | Shift / Alt |
+| Lean left / right | Q / E |
+| Blink: hold to aim, release to go | Right mouse or F |
+| Blink tier I / II | 1 / 2 |
+| Mute game sounds | M |
+| Blink debug gizmos (target footprint and ground line) | G |
+| Show or hide Corvo's arms and sword | H |
+| Reset to spawn | R |
+| Toggle help | F1 |
+| Free the cursor (press again to quit) | Esc |
 
-Sound effects (footsteps per surface, landings, mantle, slide, Blink and more) are decoded at startup from
-your install's Wwise packages. Set `SINHONOR_LOG_SFX=1` to print each cue as it plays.
+## The moves
 
-Effects are the game's own particle systems, simulated and drawn as sprites: the Blink targeting marker
-(ground and fall variants), the Blink arrival wind on the camera lens, slide dust, landing dust, footstep puffs
-on gravel and water, water splash, swimming wake, and drips on the lens after leaving water. Hard landings
-also shake the camera.
+Distances are in metres; the game works in Unreal units, where 1 uu = 1 cm.
 
-On Linux the demo runs natively on Wayland, using a real pointer lock. Under X11 the cursor is confined and re-centred instead.
+- **Walk, run, sprint, sneak**: Corvo runs at 4 m/s, sprints at 6 m/s, sneaks crouched at 2.75 m/s and slow-walks at 2 m/s. These are the `m_GroundSpeed*` attributes from Corvo's release tweak (`Twk_Pawn_Corvo_Release`), per difficulty. Strafing and backing up are slower, with separate multipliers for running, sneaking and sprinting (`m_GroundStrafeMultiplier*`, `m_GroundBackwardMultiplier*`): sprinting sideways is 60% and backwards 55%. Acceleration is 20 m/s² (`m_AccelerationRate`), with UE3's ground friction of 8.
+- **Jump**: launches at 8 m/s straight up (`m_JumpZ`, the same attribute the game's `StatePlayerMasterJump` reads) under 15 m/s² of gravity (`DefaultGame.ini`). That's a 2.1 m apex. The vertical speed of whatever you stand on is added, as the game does. Air control is 20% (`m_fAirControl`), and it never pushes you past the speed cap.
+- **Fall**: touching down faster than 22.5 m/s reports fall damage (`m_MaxSpeedBeforeFallingDamage`; there's no health, so the HUD logs it). The landing dip and the camera shake scale with how hard you hit.
+- **Crouch**: the collision shrinks from 1.75 m tall to 58 cm (`DishonoredPawn`'s cylinder and `CrouchHeight`), keeping your feet in place. Standing up only happens if there's room.
+- **Auto-crouch**: walk at a gap only a crouched Corvo fits through and he crouches by himself, then stands once the way ahead is clear (`m_fAutoCrouchTestDistance` 1 m, `m_fAutoCrouchMinCrawlDepth`).
+- **Slide**: crouch while sprinting. Your speed bleeds from where you started down to sneak speed over the game's 1.1 s (`m_fSlideTime`). The first half can't be cancelled (`m_fSlidePercentNotCancelable` 0.5); after that, crouch stands you up and jump jumps out of it.
+- **Mantle**: jump at a ledge, or hold forward or jump while falling past one. The ledge finder walks up the wall in 12 cm steps, finds the top, checks there's room for you (standing, or else crouched), then climbs. The heights come from `m_pMantleTweaks`:
+  - under 44 cm: you just step up (`MaxStepHeight`);
+  - 55 cm–1.2 m: a low mantle, the game's quick step-up blend;
+  - 1.2–1.7 m: medium;
+  - 1.7–2.3 m: high;
+  - over 2.3 m: too high, so Blink up.
 
-`--autopilot <dir>` plays a scripted route (mantle, blink, ladder, rooftop blink, slide, close-up Blink
-marker and arrival lens), prints the motion state at each checkpoint and writes screenshots to `<dir>`.
-Add `--route fx` for the ground and water effects route (gravel, puddle, pool, swimming, climbing out).
+  Each kind lasts as long as its animation (`Sword_Ready_MantleLow`, `…Medium`, `…High`, and the sneak variants). Falling faster than 10 m/s you can only catch edges at least 1.55 m high (`m_fFallSpeedForLedgeGrab`, `m_fLedgeGrabMantleMinEdgeHeight`), and edges, faces and tops have to be within the tweak's angle limits.
+- **Lean**: Q and E lean up to 15°. The lean is a spring (`DefaultCamera.ini`'s springiness 80 and damping 12) that tilts the camera by half the angle, and it is clamped so your head never goes through a wall.
+- **Swim**: walk into deep water and you swim at up to 6 m/s (`m_WaterSpeed`). Like the game, you move in strokes: strong acceleration for 0.3 s, then a weaker glide (`DefaultPlayerState.ini`'s swim block). Buoyancy holds your eyes at the surface. Swim at a ledge and jump to climb out.
+- **Ladder**: walk into one to grab on. You climb at 2.54 m/s (`LadderSpeed`) toward where you look, and step off onto the landing at the top.
+- **Camera**: head bob and roll scale with speed (the bob and roll amounts from `DefaultCamera.ini`), landings dip the view on a spring, and the FOV is the game's 75°.
+
+### Blink
+
+Blink follows the game's native code (`DishonoredActivePowerComponent_Blink`, read with Ghidra and written up in our own words in `NOTES.md` §5). Its numbers come from `Twk_Blink`'s per-level array.
+
+- **Range: a squashed sphere.** Looking level or down, you reach 11 m (tier I) or 16 m (tier II). Looking up, the aim is scaled until its height reaches 5 m, so you can blink a long way across but only 5 m up.
+- **Targeting** runs every frame while you hold the button. A 20 cm box is swept along your aim. If it hits a wall close in front of you (within 3 m) the ray is nudged up, then sideways, 30 cm at a time, so you can blink past corners. From the hit it **pulls back** in half-radius steps until your whole body fits, but never behind the camera. That's why blinking at a wall puts you just in front of it. Then it drops a sweep to find the ground and raises the target so you fit above it.
+- **The marker** is the game's own particle systems. `Blink_Ground_01` sits on the ground under the target, pitched 90° down as the native display places it. `Blink_Fall_01` floats at the target when it's above the ground. `Blink_Mantle_01` shows when the target is a ledge. The vertical beam is the systems' far LOD, which only spawns beyond 2.56 m, as in the game.
+- **Travel**: on release, physics switches to flying, and if you're standing Corvo crouches so low gaps fit (the target stays the same point, so a crouched body arrives with its feet higher, which is how Blink reaches ledges above you). He then moves 1 m every 10 ms (about 100 m/s), in sub-moves of at most 50 cm, **without collision**: the targeting sweeps already made the path safe. Travel stops at the target, if it would pass it, or on touching a pawn.
+- **Arrival**: your velocity from before the blink is restored, so blink-jumping keeps momentum. Then comes the game's post-blink ledge check (a step-up or a full mantle, using `m_pMantleBlinkTweaks`) and an attempt to stand up.
+- **Cooldown**: 1 s, with the game's cooldown lens effect (`Twk_Blink_Cooldown`, white streaks thrown back past the camera) and a decaying wobble.
+- **Screen effect**: the game's warm-up wobble, travel distortion and blur curves (`m_fMoveBlurMaxStrength` and friends) drive the demo's vignette, a FOV punch and camera motion blur. Moving straight ahead at Blink speed, the blur streaks outward from a sharp centre, much like the game's radial blur.
+
+## Corvo's arms, sounds and effects (from your copy of Dishonored)
+
+At startup the demo loads **Corvo's first-person arms, his sword, their textures and animations, the motion sounds and the particle effects** from your install. Nothing from Dishonored is included in this project; each run reads these from the files below.
+
+| File (under `DishonoredGame/CookedPCConsole`) | What it provides |
+|---|---|
+| `Startup.upk` | Corvo's tweak tree (speeds, jump, mantle, slide, camera), the sword (`Wpn_PlySwords.Wpn_PlySword01`), all 385 first-person animations (`Ply_*`) and their effect notifies, the swimming and lens-drip effects |
+| `Engine.upk` | The arms (`Ply_Player.Skm_Player`) and their textures, engine defaults (floor angle, friction) |
+| `DishonoredGame.upk` | Pawn collision and eye height, `Twk_Blink`, the Blink markers and lens effect, footstep, slide, landing and splash effects, and the cobble, rock and plank textures the test course is dressed with |
+| `Textures.tfc` and the other `.tfc` caches | Texture mips, read by byte range |
+| `Bank_Footsteps.pck`, `Bank_Player.pck`, `Bank_Power_Player.pck`, `Bank_UI_Ingame_Water.pck` | Footsteps per surface and gait, slides, landings, mantles, crouch and stand, fall wind, sprint breath, swim strokes, and Blink's warm-up, cast and fizzle |
+| `../Config/DefaultGame.ini`, `DefaultPlayerState.ini`, `DefaultCamera.ini` | Gravity, lean, swim, FOV, bob and roll |
+
+The movement needs only the tuning. Everything else is optional and skipped with a warning if it's missing.
+
+**How the arms work.**
+
+- **Animations**: Dishonored cooks its animations in Sony's Edge format (built for the PS3's SPUs), which is why other UE3 viewers can't play them. `crates/edge_anim` decodes them.
+- **Layers**: a base layer plays the sword hand and body (`Sword_Ready_Idle/Walk/Run/Sprint`, `Sword_Sneak_*`, `Sword_SlideLoop`, `Empty_Swim*`, the mantles, `Sword_Ready_JumpLandSmall`). A left-arm layer plays the power hand (`Powers_Idle/Walk/Sprint/Jump`, then `Powers_Cast_Blink_In`, `…_Loop` and `…_Out` around a blink). Changes crossfade over 0.18 s.
+- **Camera bone**: the view is the skeleton's `camera_jnt` bone, so the arms sit exactly where the game puts them at its 75° FOV.
+- **Sword**: held on the `RightHandWpn` socket. It's put away for the unarmed (`Empty_*`) swim animations.
+- **Drawing**: the arms and sword are skinned on the CPU and drawn by a second camera on their own layer, so they never clip into walls.
+- **Effects from the animations**: when Blink is cast, the gold glow and smoke on the back of the hand come from the animations themselves. `Powers_Cast_Blink_In` and `_Loop` trigger `Ps_Tattoo_Glow_02` on the hand's `Tattoo` socket at 0 s (so it re-fires on every 0.33 s loop while you aim), and `_Out` triggers `Ps_Tattoo_Glow_04`. The swim strokes put splashes on the fingers the same way. The demo reads every one of these notifies, so the effects keep the game's timing.
+
+**Sound.** Wwise sound packages are parsed and their Vorbis audio converted to Ogg in memory. Footsteps follow your gait and the surface under you (stone, wood, gravel, water, roof tiles, metal). Set `SINHONOR_LOG_SFX=1` to print each cue as it plays.
+
+**Effects.** The game's Cascade particle systems are simulated and drawn as sprites, at the game's distance LODs. They include the Blink marker and arrival streaks, slide dust, landing dust, footstep puffs on gravel and water, water splash, swimming wake, and drips on the lens after you climb out of water. Hard landings also shake the camera.
+
+**What's still approximate:**
+
+- **Not yet traced in the exe**: walking uses UE3's standard `CalcVelocity` model, not Dishonored's own "LocoNew" walking path. The mantle's ledge finder, the slide and the lean are modelled from the tweak values and animation lengths, not traced.
+- **Camera**: the head bob is procedural. The game drives it from a camera animation (`Ply_Nav_LocoCamera_at`), which the Edge decoder can now read but nothing plays yet.
+- **Effects**: mesh-particle emitters (the Blink swirl rings), SubUV flipbooks and the real Blink post-process material aren't done. There's no bloom.
+- **Smoke**: the hand smoke is simulated relative to the camera, so it doesn't trail behind you as it does in the game.
+- **Agility** (power jump, double jump) isn't in yet.
+
+`NOTES.md` §6 has a fidelity table for every part.
+
+## The test course
+
+A blockout course dressed with the game's textures (`crates/sinhonor_demo/src/level.rs`). You start facing along it.
+
+1. **Mantle wall**, 8 m ahead: five blocks of rising height, 30 cm (step up), 90 cm (low), 1.5 m (medium), 2.2 m (high) and 3.2 m (too high, so Blink onto it).
+2. **Stairs** on the right, 20 cm risers up to a 3 m balcony.
+3. **Gravel patch** on the left and a **puddle** on the right, for footsteps and their dust and splashes.
+4. **Pool** behind you to the left: 4 m deep, for swimming and climbing out.
+5. **Slide lane**: a crawl beam 1 m off the ground that only fits you crouched or sliding.
+6. **Lean pillars** to peek round.
+7. **Ladder tower**, 6 m up, then **rooftops** with gaps of 8 m, 10 m and 14 m. Tier I clears the first, and the last needs tier II.
+8. **The perch**: an 11 m pillar you can only reach by blinking upward from the rooftops.
+9. **Two dummy guards** to blink at (Blink stops at pawns).
 
 ## Using the motion kit in another game
 
-Implement `dis_motion::World` (a box sweep plus optional water, ladder and blink-blocker queries) over your
-physics, build `MotionTuning::from_game(&dis_data::load(..)?)`, and call `Motion::update(&world, &input, dt)`
-each frame. Read back `motion.camera.eye`, `motion.yaw` and `motion.pitch`, `motion.camera.roll` and `fov_deg`,
-plus `motion.blink.fx` for the lens effect. Coordinates are Unreal-style (Z up, cm). Convert at your boundary.
+`dis_motion` only needs two things from a host game:
+
+- A `World` implementation. Only one method is required:
+  - `sweep(start, end, half)`: move a box along a path and report the first blocking hit (point, normal, and whether it started inside something). A zero `half` is a line trace.
+
+  The others have defaults: `overlaps`, `water` (the water volume at a point), `ladder`, and `blink_blocked` (the game's blink-blocking volumes). Every move is built on these, so any collision a host has will do. `BoxWorld` (axis-aligned boxes) is included.
+- An `Input` each frame: move axes, look delta, and jump, crouch, sprint, walk, lean and Blink buttons.
+
+Then:
+
+```rust
+let data = dis_data::load(&install, dis_data::Difficulty::Normal)?;
+let mut motion = Motion::new(MotionTuning::from_game(&data), spawn, yaw);
+// every frame
+let events = motion.update(&world, &input, dt);
+```
+
+Read back `motion.camera.eye`, `motion.yaw`, `motion.pitch`, `motion.camera.roll` and `motion.camera.fov_deg` for the camera, `motion.state` and `events` for animation and sound, and `motion.blink` (mode, target and `fx` screen parameters) for Blink's visuals. Coordinates are Unreal-style: Z up, centimetres. Convert at your boundary.
 
 ## Tests
 
@@ -71,14 +153,60 @@ plus `motion.blink.fx` for the lens effect. Coordinates are Unreal-style (Z up, 
 cargo test --workspace
 ```
 
-One test uses your install when it can find it, and skips otherwise.
+`crates/dis_motion/tests/motion.rs` drives the controller with scripted input. It checks:
 
-## Research notes
+- settling on the floor and running at run speed;
+- the jump apex against ballistics;
+- stepping up small ledges and mantling tall ones;
+- the slide bleeding to crouch speed;
+- auto-crouching under a low gap;
+- Blink reaching a wall and keeping momentum, staying on the floor when cast crouched, and its squashed-sphere range;
+- swimming at the surface and climbing a ladder.
 
-`NOTES.md` records what was learned about the file formats and the game's motion and Blink
-behaviour, written in our own words. Decompiled code and game data are never committed.
+One test runs on your install's real tuning when it can find it, and skips otherwise.
+
+## Where the numbers come from
+
+All the tuning is read at runtime by `crates/dis_data`, and `cargo run --release -p dis_data --example dump_tuning` prints everything it found.
+
+- **Corvo's tweak tree** (`Startup.upk`): the root is `Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release`. It points at one attribute set per difficulty (each `DisAttribute` holds four values, Easy to VeryHard), the mantle tweaks, a separate mantle tweak used after a blink, and the camera tweaks.
+- **Pawn defaults** (`DishonoredGame.upk`, `Engine.upk`): collision size, crouch size, step height, eye height, ladder speed, walkable floor angle and friction, from the class default objects.
+- **INI files**: gravity, lean springs, swim strokes, FOV, bob and roll.
+- **Animation lengths** (`Startup.upk`): mantles, slides and landings last as long as the animations that play them.
+- **Native code** (Ghidra): Blink's targeting, travel, end and screen effect, and the jump. The game's gameplay logic is in `Dishonored.exe`, not in its UnrealScript. `NOTES.md` describes what was learned, in our own words. Decompiled code is never committed.
+
+## Layout
+
+```
+crates/dis_motion/     the motion kit: engine-agnostic, depends only on glam
+  src/controller.rs    the state machine: walk, crouch, jump, fall, slide, mantle, swim, ladder, Blink travel
+  src/blink.rs         Blink targeting, range, pull-back, stepping, cooldown and screen parameters
+  src/camera.rs        eye height, bob, roll, landing dip, lean spring, FOV
+  src/collide.rs       collide-and-slide on top of World::sweep
+  src/boxworld.rs      a World made of axis-aligned boxes, water, ladders and pawns
+  src/tuning.rs        MotionTuning, built from the game's values
+  tests/motion.rs      one test per move, by scripted input
+crates/dis_data/       finds the install and loads tuning, sounds, effects, arms and textures from it
+crates/upk/            UE3 package reader: LZO, names, imports, exports, tagged properties, textures, skeletal meshes
+crates/edge_anim/      Sony Edge animation decoder
+crates/wwise/          Wwise sound packages (AKPK, bank v65) to Ogg
+crates/cascade/        UE3 Cascade particle systems: loading, materials and simulation
+crates/sinhonor_demo/  the Bevy test course
+  src/main.rs          app, input, camera, sounds, effect triggers, HUD, autopilot
+  src/hands.rs         Corvo's arms and sword: animation layers, CPU skinning, viewmodel camera
+  src/fx.rs            particle rendering, in the world, on the lens and in the viewmodel
+  src/level.rs         the test course, as data
+NOTES.md               research notes: formats, the game's motion and Blink, credits
+```
+
+The `examples/` of `upk`, `cascade`, `edge_anim`, `wwise` and `dis_data` are the dev tools used to work all this out: package dumps, particle simulation, texture and animation probes, and a reference finder.
+
+## Screenshot mode
+
+`cargo run --release -p sinhonor_demo -- --autopilot shots` plays a scripted route with no mouse needed: a mantle, a blink, the ladder, the rooftop blink, a slide, a close-up of the Blink marker and the arrival lens effect. It prints the motion state at each checkpoint, saves a PNG of each into `shots/`, and quits. Add `--route fx` for the effects route instead: the Blink marker near and far, mid-travel, gravel, puddle, falling into the pool, swimming and climbing out. It's handy for checking nothing broke after a change.
 
 ## Credits and licenses
 
-See `NOTES.md` §Credits. This project is dual-licensed under MIT or Apache-2.0.
-Dishonored is a trademark of ZeniMax Media; this project is not affiliated with Arkane Studios or Bethesda.
+Built with help from UE Viewer, UELib, ue3-tools, dishonoredrecompiled's format notes, CodeRed-Generator, ww2ogg and lewton, on [Bevy](https://bevyengine.org) and [glam](https://github.com/bitshifter/glam-rs). Structural references: [iw4L](https://github.com/vladtrc/iw4L), [gang-beasts-rust](https://github.com/muffinmxn/gang-beasts-rust), [benilla](https://github.com/samwhosung/benilla) and [2010-rust-rewrite-mashup](https://github.com/chasmlol/2010-rust-rewrite-mashup). `NOTES.md` §8 has the full list with licenses.
+
+This project is dual-licensed under MIT or Apache-2.0. Dishonored is a trademark of ZeniMax Media; this project is not affiliated with Arkane Studios or Bethesda.
