@@ -3,6 +3,7 @@
 //!
 //! cargo run --release -p sinhonor_demo -- [--game <Dishonored dir>] [--difficulty easy|normal|hard|veryhard]
 
+mod fx;
 mod level;
 
 use bevy::audio::{AudioPlayer, AudioSource, PlaybackSettings, Volume};
@@ -13,7 +14,9 @@ use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 use bevy::window::{CursorGrabMode, PrimaryWindow};
 use dis_data::sounds::{Cue, Gait, Sounds, Surface};
 use dis_motion::{BlinkEvent, BlinkMode, Input as MotionInput, MantleKind, Motion, MotionState, MotionTuning, StepEvents};
+use glam::Affine3A as Affine3AId;
 use std::collections::HashMap;
+use std::f32::consts::{FRAC_PI_2, PI};
 use level::{Kind, Level};
 use std::path::PathBuf;
 
@@ -57,6 +60,8 @@ struct Sfx {
     prev_crouched: bool,
     warmup: Vec<Entity>,
     fall_wind: Vec<Entity>,
+    /// Footsteps played this frame (surface, feet position) for the effects system.
+    steps: Vec<(Surface, dis_motion::Vec3)>,
 }
 
 impl Sfx {
@@ -101,10 +106,36 @@ struct Step {
     input: MotionInput,
     view: Option<(f32, f32)>,
     shot: bool,
+    /// Place the player's feet here first (Unreal units).
+    teleport: Option<[f32; 3]>,
 }
 
 fn step(name: &'static str, secs: f32, input: MotionInput) -> Step {
-    Step { name, secs, input, view: None, shot: false }
+    Step { name, secs, input, view: None, shot: false, teleport: None }
+}
+
+/// Ground and water effects: gravel and puddle footsteps, pool splash, swimming, climbing out.
+fn autopilot_fx_script() -> Vec<Step> {
+    let fwd = MotionInput { move_axis: Vec2::new(0.0, 1.0), ..default() };
+    let idle = MotionInput::default();
+    vec![
+        Step { teleport: Some([200.0, -800.0, 0.0]), view: Some((-FRAC_PI_2, -0.6)), ..step("to gravel", 0.5, idle) },
+        step("walk onto gravel", 1.1, fwd),
+        Step { shot: true, ..step("gravel steps", 0.25, fwd) },
+        Step { teleport: Some([200.0, 800.0, 0.0]), view: Some((FRAC_PI_2, -0.6)), ..step("to puddle", 0.5, idle) },
+        step("walk into puddle", 0.9, fwd),
+        Step { shot: true, ..step("puddle steps", 0.25, fwd) },
+        Step { teleport: Some([-2000.0, -1250.0, 0.0]), view: Some((-FRAC_PI_2, -0.5)), ..step("to pool edge", 0.5, idle) },
+        step("walk off into the pool", 0.45, fwd),
+        Step { shot: true, ..step("splash", 0.35, idle) },
+        step("settle", 1.5, idle),
+        Step { view: Some((-FRAC_PI_2, -0.3)), shot: true, ..step("swimming", 1.2, fwd) },
+        Step { view: Some((FRAC_PI_2, 0.0)), ..step("turn to edge", 0.1, idle) },
+        step("swim to edge", 2.5, fwd),
+        step("climb out", 1.2, MotionInput { jump: true, ..fwd }),
+        Step { shot: true, ..step("out of water", 0.3, idle) },
+        step("flush", 0.5, idle),
+    ]
 }
 
 fn autopilot_script() -> Vec<Step> {
@@ -130,6 +161,10 @@ fn autopilot_script() -> Vec<Step> {
         Step { shot: true, ..step("sliding", 0.3, MotionInput { sprint: true, ..fwd }) },
         step("slide out", 1.0, idle),
         Step { shot: true, ..step("end", 0.3, idle) },
+        step("blink cooldown", 1.2, idle),
+        Step { view: Some((PI, -0.35)), shot: true, ..step("near blink marker", 1.0, MotionInput { blink: true, ..idle }) },
+        Step { shot: true, ..step("blink arrival lens", 0.12, idle) },
+        Step { shot: true, ..step("blink arrival lens later", 0.25, idle) },
         step("flush", 0.5, idle),
     ]
 }
@@ -161,7 +196,15 @@ fn main() {
             }
             "--autopilot" => {
                 autopilot.out = args.next().map(PathBuf::from);
-                autopilot.steps = autopilot_script();
+                if autopilot.steps.is_empty() {
+                    autopilot.steps = autopilot_script();
+                }
+            }
+            "--route" => {
+                // `--route fx` picks the ground/water effects route for --autopilot.
+                if args.next().as_deref() == Some("fx") {
+                    autopilot.steps = autopilot_fx_script();
+                }
             }
             "-h" | "--help" => {
                 println!("usage: sinhonor_demo [--game <Dishonored install dir>] [--difficulty easy|normal|hard|veryhard]");
@@ -187,6 +230,10 @@ fn main() {
     let sounds = dis_data::sounds::load_sounds(&install, &data.blink.sound_events);
     for w in &sounds.warnings {
         eprintln!("sound warning: {w}");
+    }
+    let effects = dis_data::effects::load_effects(&install);
+    for w in &effects.warnings {
+        eprintln!("effect warning: {w}");
     }
     let tuning = MotionTuning::from_game(&data);
     let level = level::build();
@@ -217,6 +264,7 @@ fn main() {
         prev_crouched: false,
         warmup: Vec::new(),
         fall_wind: Vec::new(),
+        steps: Vec::new(),
     };
 
     App::new()
@@ -227,10 +275,12 @@ fn main() {
         .insert_resource(sim)
         .insert_resource(autopilot)
         .insert_resource(sfx)
+        .insert_resource(fx::FxWorld::new(effects))
+        .insert_resource(FxState::default())
         .insert_resource(ClearColor(Color::srgb(0.55, 0.6, 0.66)))
         .insert_resource(AmbientLight { color: Color::WHITE, brightness: 400.0, ..default() })
         .add_systems(Startup, (setup_scene, load_audio, grab_cursor.run_if(|a: Res<Autopilot>| a.steps.is_empty())))
-        .add_systems(Update, (cursor_toggle, gather_look, simulate, play_sounds, draw_blink, update_camera, update_hud).chain())
+        .add_systems(Update, (cursor_toggle, gather_look, simulate, play_sounds, fx_triggers, update_camera, fx::update_fx, draw_blink, update_hud).chain())
         .run();
 }
 
@@ -244,6 +294,7 @@ fn color_for(kind: Kind) -> Color {
         Kind::Guard => Color::srgb(0.65, 0.18, 0.15),
         Kind::Ladder => Color::srgb(0.75, 0.62, 0.20),
         Kind::Water => Color::srgba(0.15, 0.32, 0.45, 0.55),
+        Kind::Gravel => Color::srgb(0.42, 0.38, 0.33),
     }
 }
 
@@ -375,6 +426,11 @@ fn simulate(
         }
         let st = auto.steps[auto.idx].clone();
         if auto.t == 0.0 {
+            if let Some(p) = st.teleport {
+                let (tuning, level) = (sim.tuning.clone(), sim.motion.blink.level);
+                sim.motion = Motion::new(tuning, dis_motion::Vec3::from(p), 0.0);
+                sim.motion.blink.level = level;
+            }
             if let Some((yaw, pitch)) = st.view {
                 sim.motion.yaw = yaw;
                 sim.motion.pitch = pitch;
@@ -466,6 +522,7 @@ fn surface_at(level: &Level, p: dis_motion::Vec3) -> Surface {
     });
     match piece.map(|pc| pc.kind) {
         Some(Kind::Stairs | Kind::Ledge) => Surface::Wood,
+        Some(Kind::Gravel) => Surface::Gravel,
         Some(Kind::Roof) => Surface::Rooftile,
         Some(Kind::Ladder) => Surface::Metal,
         _ => Surface::Stone,
@@ -496,6 +553,7 @@ fn play_sounds(mut commands: Commands, time: Res<Time>, keys: Res<ButtonInput<Ke
             sfx.step_accum = 0.0;
             let vol = if gait == Gait::Sneak { 0.35 } else { 0.6 };
             sfx.play(&mut commands, Cue::Footstep(surface, gait), vol);
+            sfx.steps.push((surface, feet));
         }
     } else if m.state != MotionState::Walking {
         sfx.step_accum = 75.0; // first step lands soon after touching down
@@ -589,6 +647,105 @@ fn play_sounds(mut commands: Commands, time: Res<Time>, keys: Res<ButtonInput<Ke
     sfx.prev_crouched = m.crouched;
 }
 
+/// Which effects are running for ongoing motion states.
+#[derive(Resource, Default)]
+struct FxState {
+    marker: Option<(dis_data::effects::Fx, u64)>,
+    slide: Option<u64>,
+    swim_timer: f32,
+    prev_state: Option<MotionState>,
+    /// Camera shake: remaining time and strength.
+    shake: (f32, f32),
+}
+
+fn fx_triggers(time: Res<Time>, sim: Res<Sim>, mut sfx: ResMut<Sfx>, mut fxw: ResMut<fx::FxWorld>, mut st: ResMut<FxState>) {
+    use dis_data::effects::Fx;
+    let m = &sim.motion;
+    let ev = &sim.frame_events;
+    fxw.camera = fx::camera_basis(m.camera.eye, m.view_dir());
+    let feet = m.feet();
+
+    // Blink targeting marker: the ground or fall variant, facing the player, at the target.
+    match (m.blink.mode, m.blink.target) {
+        (BlinkMode::Targeting, Some(t)) => {
+            let target_feet = t.point - dis_motion::Vec3::Z * m.half().z;
+            let kind = if target_feet.z - t.ground_point.z > 40.0 { Fx::BlinkFall } else { Fx::BlinkGround };
+            let xf = fx::placed(target_feet, m.yaw);
+            match st.marker {
+                Some((k, id)) if k == kind => fxw.set_transform(id, xf),
+                other => {
+                    if let Some((_, id)) = other {
+                        fxw.stop(id);
+                    }
+                    st.marker = Some((kind, fxw.spawn(kind, xf, fx::Attach::World)));
+                }
+            }
+        }
+        _ => {
+            if let Some((_, id)) = st.marker.take() {
+                fxw.stop(id);
+            }
+        }
+    }
+    if ev.blink.contains(&BlinkEvent::Ended) {
+        fxw.spawn(Fx::BlinkArriveLens, Affine3AId::IDENTITY, fx::Attach::Camera);
+    }
+
+    // Slide trail at the feet while sliding.
+    if m.state == MotionState::Sliding {
+        let xf = fx::placed(feet, m.vel.y.atan2(m.vel.x));
+        match st.slide {
+            Some(id) => fxw.set_transform(id, xf),
+            None => {
+                let kind = if surface_at(&sim.level, feet) == Surface::Stone { Fx::SlideStone } else { Fx::SlideGeneric };
+                st.slide = Some(fxw.spawn(kind, xf, fx::Attach::World));
+            }
+        }
+    } else if let Some(id) = st.slide.take() {
+        fxw.stop(id);
+    }
+
+    // Footstep puffs on loose and wet ground.
+    for (surface, at) in std::mem::take(&mut sfx.steps) {
+        let kind = match surface {
+            Surface::Gravel => Fx::StepGravel,
+            Surface::Water => Fx::StepWater,
+            _ => continue,
+        };
+        fxw.spawn(kind, fx::placed(at, m.yaw), fx::Attach::World);
+    }
+    if let Some(impact) = ev.landed {
+        let surface = surface_at(&sim.level, feet);
+        if impact > 900.0 && matches!(surface, Surface::Gravel | Surface::Stone) {
+            fxw.spawn(Fx::LandDirt, fx::placed(feet, m.yaw), fx::Attach::World);
+        }
+        if impact > 900.0 {
+            st.shake = (0.35, (impact / sim.tuning.fall_damage_speed).clamp(0.3, 1.5));
+        }
+    }
+
+    // Water: splash on entry, wake while swimming, droplets on the lens after climbing out.
+    let surface_z = sim.level.world.water.iter().find(|w| w.contains(m.pos)).map(|w| w.max.z);
+    if m.state == MotionState::Swimming {
+        if st.prev_state != Some(MotionState::Swimming) {
+            if let Some(z) = surface_z {
+                fxw.spawn(Fx::WaterSplash, fx::placed(dis_motion::Vec3::new(m.pos.x, m.pos.y, z), m.yaw), fx::Attach::World);
+            }
+        }
+        st.swim_timer -= time.delta_secs();
+        if st.swim_timer <= 0.0 && m.speed_2d() > 30.0 {
+            st.swim_timer = 0.45;
+            if let Some(z) = surface_z {
+                fxw.spawn(Fx::Swimming, fx::placed(dis_motion::Vec3::new(m.pos.x, m.pos.y, z), m.yaw), fx::Attach::World);
+            }
+        }
+    } else if st.prev_state == Some(MotionState::Swimming) {
+        fxw.spawn(Fx::CameraWater, Affine3AId::IDENTITY, fx::Attach::Camera);
+    }
+    st.prev_state = Some(m.state);
+    st.shake.0 = (st.shake.0 - time.delta_secs()).max(0.0);
+}
+
 fn push_log(sim: &mut Sim, s: String) {
     sim.log.push(s);
     if sim.log.len() > 6 {
@@ -605,19 +762,25 @@ fn draw_blink(sim: Res<Sim>, mut gizmos: Gizmos) {
     let half = sim.motion.half();
     let feet = t.point - dis_motion::Vec3::Z * half.z;
     let color = if t.stop_at_pawn { Color::srgb(1.0, 0.3, 0.2) } else { Color::srgb(0.3, 0.9, 1.0) };
-    gizmos.sphere(Isometry3d::from_translation(to_bevy(t.point)), 0.12, color);
-    gizmos.circle(Isometry3d::new(to_bevy(feet), Quat::from_rotation_arc(Vec3::Z, Vec3::Y)), half.x * SCALE, color);
-    gizmos.line(to_bevy(feet), to_bevy(t.ground_point), color.with_alpha(0.5));
-    gizmos.circle(Isometry3d::new(to_bevy(t.ground_point) + Vec3::Y * 0.01, Quat::from_rotation_arc(Vec3::Z, Vec3::Y)), 0.25, color.with_alpha(0.6));
+    // The game's marker effect does the heavy lifting; keep a faint footprint and drop line.
+    gizmos.circle(Isometry3d::new(to_bevy(feet), Quat::from_rotation_arc(Vec3::Z, Vec3::Y)), half.x * SCALE, color.with_alpha(0.35));
+    gizmos.line(to_bevy(feet), to_bevy(t.ground_point), color.with_alpha(0.2));
 }
 
-fn update_camera(sim: Res<Sim>, mut cams: Query<(&mut Transform, &mut Projection), With<PlayerCam>>, mut overlay: Query<&mut BackgroundColor, With<BlinkOverlay>>) {
+fn update_camera(time: Res<Time>, sim: Res<Sim>, st: Res<FxState>, mut cams: Query<(&mut Transform, &mut Projection), With<PlayerCam>>, mut overlay: Query<&mut BackgroundColor, With<BlinkOverlay>>) {
     let Ok((mut tf, mut proj)) = cams.single_mut() else { return };
     let m = &sim.motion;
     let dir = m.view_dir();
     let eye = to_bevy(m.camera.eye);
     *tf = Transform::from_translation(eye).looking_to(Vec3::new(dir.x, dir.z, dir.y), Vec3::Y);
     tf.rotate_local_z(-m.camera.roll);
+    let (left, strength) = st.shake;
+    if left > 0.0 {
+        let k = strength * (left / 0.35).powi(2) * 0.02;
+        let t = time.elapsed_secs() * 40.0;
+        tf.rotate_local_x(k * t.sin());
+        tf.rotate_local_y(k * 0.6 * (t * 1.3).cos());
+    }
     if let Projection::Perspective(p) = &mut *proj {
         p.fov = m.camera.fov_deg.to_radians();
     }

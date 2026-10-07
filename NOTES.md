@@ -313,7 +313,7 @@ carrying-corpse variant). The vertical velocity of the base the player stands on
 
 | Part | Status |
 |---|---|
-| Blink targeting, range, pull-back, ground correction, stepping, end and cooldown, lens parameters | **Follows the native code** (§5). The sub-move adds an overlap safety check |
+| Blink targeting, range, pull-back, ground correction, stepping, end and cooldown, lens parameters | **Follows the native code** (§5), including moving without collision during travel |
 | Jump velocity | **Follows the native code** (attribute `m_JumpZ`) |
 | All speeds, acceleration, air control, gravity, step height, collision sizes, mantle thresholds, slide timing, lean springs, swim | **Game values**, read at runtime |
 | Walking and falling integration | UE3 `CalcVelocity`-style model; Dishonored's own "LocoNew" path not traced yet |
@@ -352,22 +352,72 @@ decoding both and keeping the one with the least clipping.
   (Start, Stop and Power_Empty).
 - Swim: `Bank_UI_Ingame_Water.pck` (`Snd_P_Swim`).
 
+## 6c. Particle effects (Cascade) and textures, read at runtime (2026-10-07)
+
+**Systems.** `ParticleSystem` exports list `Emitters` (object refs). Each emitter has `LODLevels`; LOD 0 holds
+`RequiredModule`, `SpawnModule`, an optional `TypeDataModule` (mesh emitters) and `Modules`. Every module is a
+plain object whose curves are `RawDistributionFloat`/`RawDistributionVector` structs. **Cooked, the curve is baked**
+into `LookupTable` (floats):
+- `[0..2]` is the overall min/max.
+- Samples follow, spaced `1/LookupTableTimeScale` apart in normalised time, starting at `LookupTableStartTime`.
+- Each sample has `LookupTableNumElements` values; 2 means a min/max pair, picked per particle at random.
+  `LookupTableChunkSize` floats per sample in all.
+- A time scale of 0 means constant.
+
+**Omitted values come from the class default.** UE3 serializes only what differs from the class default object, so
+a module missing its `Rate` table, for example, uses `Engine.upk`'s `Default__ParticleModuleSpawn`. Structs are merged
+field by field. Bursts are `BurstList`, an array of tagged `{Count, CountLow, Time}` structs, with `Time` in normalised
+emitter time.
+
+**Modules used by the motion effects:** Required (material, alignment `PSA_Velocity`, local space, kill on
+deactivate, duration, loops, delay), Spawn (rate, rate scale, bursts), Lifetime, Size, SizeMultiplyLife,
+SizeMultiplyVelocity, Color, ColorOverLife, ColorScaleOverLife, Velocity (with radial), VelocityOverLifetime,
+Acceleration, Location, LocationPrimitiveCylinder, Rotation, RotationRate, RotationRateMultiplyLife, OrientationAxisLock.
+Not handled yet: SubUV flipbooks, Orbit, Collision, VelocityInheritParent, and **mesh emitters** (TypeDataMesh: debris,
+the Blink swirl cylinders), which need static-mesh import.
+
+**Where the effects are.**
+- Blink targeting markers: `Twk_Blink.m_pGroundPS`, `m_pLowFallPS`/`m_pHighFallPS` and `m_pMantlePS`, all in
+  `Vfx_GamePlay.Blink.*`.
+- Blink arrival lens effect: `m_pCooldownEffect` -> `DisTweaks_EmitterCameraLensEffect.m_DefaultParticleSystem`, which is
+  `vrosier_TestFX2.Blink2.Blink_PlayerWind_01` (shipped despite the test package name). Lens effects sit
+  `DistFromCamera` in front of the camera (`Default__EmitterCameraLensEffectBase`).
+- Footsteps, slides, landings and water: `Vfx_PhysMat.*` (DishonoredGame.upk). Swimming and lens drips: `Vfx_Water.*` and
+  `Vfx_PhysMat.Water.ps_camera_water` (Startup.upk).
+
+**Materials.** Effects use `MaterialInstanceConstant`s over a few parent materials in `Vfx_Materials.main_materials`
+(`Glow_PMAT`, `DefaultAdditive[_2Sided]_PMAT`, `DefaultTranslu_PMAT`, `WaterSplash_PMAT`). Texture parameters follow a
+naming scheme: `D_Diffuse`, `O_Opacity` (masks packed per channel), `Shape`, `UV_Distortion`, `F_Fog_Texture`. We
+approximate the material graph:
+- the parent decides additive vs translucent;
+- colour comes from the diffuse texture, coverage from the opacity or shape texture's red channel;
+- glow materials are a radial glow modulated by their noise texture;
+- the `Color` vector parameter tints.
+
+**Textures.** After a `Texture2D`'s properties: an empty `SourceArt` bulk record, then the mip count, then per mip
+`{flags, elementCount, sizeOnDisk, offset}`, the payload (inline unless flag `0x1`), and the mip's width and height.
+Flag `0x1` puts the payload in `<TextureFileCacheName>.tfc` at `offset`. Flag `0x10` means LZO in the package chunk
+format. Formats seen: DXT1, DXT5, ARGB8 and G8. `Textures.tfc` is 1.2 GB, so mips are read by byte range.
+
 ## 7. Status and next steps
 
-Done: `upk` (package reader), `dis_data` (tuning loader), `dis_motion` (motion core and Blink, tests),
-`sinhonor_demo` (Bevy course with `--autopilot` verification).
+Done: `upk` (package, texture reader), `dis_data` (tuning, sound and effect loader), `dis_motion` (motion core and
+Blink, tests), `wwise` (sound packages), `cascade` (particle runtime), and `sinhonor_demo` (Bevy course with sounds,
+the game's particle effects, and `--autopilot` verification routes).
 
 Next:
 1. Trace the native mantle edge finder (`DishonoredMantleEdgeFinderComponent`, the player-pawn ledge result at `+0x898`)
    and the Slide and Leaning states. Replace the models above.
 2. Agility: `StatePlayerMasterJump` style variants and the `Attribute_*_PowerJump*` modifiers in `DefaultPlayer.ini`.
 3. Edge animation decoder, so camera bob and mantle camera motion come from the game's camera animations.
-4. A host adapter example: dropping `dis_motion` into another Rust game, in the mashup style.
+4. Static-mesh import for mesh particle emitters (Blink swirls, slide debris); SubUV flipbooks; Blink's screen
+   post-process material (`BlinkDistancePercentage` and the other parameters) instead of the demo's tint.
+5. A host adapter example: dropping `dis_motion` into another Rust game, in the mashup style.
 
 ## 8. Credits
 
 UELib / UE Explorer (Eliot van Uytfanghe), UE Viewer (Konstantin Nosov / Gildor), ue3-tools and dishonored-toolkit
-(deadYokai), dishonoredrecompiled and dismod (ectrc), CodeRed-Generator (CodeRedModding), lzokay-native (MIT), Ghidra (NSA, Apache-2.0), [ww2ogg](https://github.com/coconutbird/ww2ogg-rs) Rust port of [hcs64/ww2ogg](https://github.com/hcs64/ww2ogg) (BSD-3-Clause), lewton (MIT/Apache-2.0).
+(deadYokai), dishonoredrecompiled and dismod (ectrc), CodeRed-Generator (CodeRedModding), lzokay-native (MIT), Ghidra (NSA, Apache-2.0), [ww2ogg](https://github.com/coconutbird/ww2ogg-rs) Rust port of [hcs64/ww2ogg](https://github.com/hcs64/ww2ogg) (BSD-3-Clause), lewton (MIT/Apache-2.0). Cascade/LookupTable layout cross-checked against UE Viewer's UE3 notes (MIT).
 Runtime dependencies: [Bevy](https://bevyengine.org) and [glam](https://github.com/bitshifter/glam-rs) (MIT OR Apache-2.0).
 Structural references: [iw4L](https://github.com/vladtrc/iw4L), [gang-beasts-rust](https://github.com/muffinmxn/gang-beasts-rust),
 [benilla](https://github.com/samwhosung/benilla), [2010-rust-rewrite-mashup](https://github.com/chasmlol/2010-rust-rewrite-mashup).

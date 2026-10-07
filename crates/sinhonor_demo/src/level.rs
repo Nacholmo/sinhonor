@@ -13,6 +13,7 @@ pub enum Kind {
     Guard,
     Ladder,
     Water,
+    Gravel,
 }
 
 pub struct Piece {
@@ -58,6 +59,12 @@ pub fn build() -> Level {
     let water = (Vec3::new(px0, py0, -400.0), Vec3::new(px1, py1, -20.0));
     l.world.add_water(water.0, water.1);
     l.pieces.push(Piece { min: water.0, max: water.1, kind: Kind::Water });
+
+    // Gravel patch (footstep dust) and a shallow puddle (water footsteps) beside the start.
+    l.solid([-200.0, -1300.0, 0.0], [600.0, -1000.0, 2.0], Kind::Gravel);
+    let puddle = (Vec3::new(-200.0, 1000.0, -5.0), Vec3::new(600.0, 1250.0, 12.0));
+    l.world.add_water(puddle.0, puddle.1);
+    l.pieces.push(Piece { min: puddle.0, max: puddle.1, kind: Kind::Water });
 
     // Mantle wall: blocks of rising height in front of spawn (step, low, medium, high, too high).
     for (i, h) in [30.0, 90.0, 150.0, 220.0, 320.0].into_iter().enumerate() {

@@ -15,6 +15,7 @@ range and stepping) is read **at runtime from your own installed copy** of Disho
 | `crates/upk` | Reader for Dishonored's UE3 packages: LZO chunk flattening, name/import/export tables, tagged properties |
 | `crates/dis_data` | Finds your install and loads the motion and Blink tuning from its packages and INI files |
 | `crates/wwise` | Reader for the Wwise sound packages (AKPK, bank v65); resolves events and converts clips to Ogg |
+| `crates/cascade` | Loads and simulates Unreal Engine 3 Cascade particle systems (with their materials and textures) from the install |
 | `crates/dis_motion` | Engine-agnostic movement and Blink logic. The host game supplies collision through a trait |
 | `crates/sinhonor_demo` | Bevy test level that shows the motion kit in action |
 
@@ -43,10 +44,16 @@ which of Corvo's attribute sets is used.
 Sound effects (footsteps per surface, landings, mantle, slide, Blink and more) are decoded at startup from
 your install's Wwise packages. Set `SINHONOR_LOG_SFX=1` to print each cue as it plays.
 
+Effects are the game's own particle systems, simulated and drawn as sprites: the Blink targeting marker
+(ground and fall variants), the Blink arrival wind on the camera lens, slide dust, landing dust, footstep puffs
+on gravel and water, water splash, swimming wake, and drips on the lens after leaving water. Hard landings
+also shake the camera.
+
 On Linux the demo runs natively on Wayland, using a real pointer lock. Under X11 the cursor is confined and re-centred instead.
 
-`--autopilot <dir>` plays a scripted route (mantle, blink, ladder, rooftop blink, slide), prints the motion
-state at each checkpoint and writes screenshots to `<dir>`.
+`--autopilot <dir>` plays a scripted route (mantle, blink, ladder, rooftop blink, slide, close-up Blink
+marker and arrival lens), prints the motion state at each checkpoint and writes screenshots to `<dir>`.
+Add `--route fx` for the ground and water effects route (gravel, puddle, pool, swimming, climbing out).
 
 ## Using the motion kit in another game
 
