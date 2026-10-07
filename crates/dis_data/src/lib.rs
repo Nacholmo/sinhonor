@@ -8,6 +8,7 @@
 pub mod ini;
 pub mod effects;
 pub mod sounds;
+pub mod viewmodel;
 
 use ini::Ini;
 use std::path::{Path, PathBuf};

@@ -9,3 +9,4 @@ license.workspace = true
 upk = { path = "../upk" }
 wwise = { path = "../wwise" }
 cascade = { path = "../cascade" }
+edge_anim = { path = "../edge_anim" }

@@ -9,6 +9,11 @@ fn main() {
     let mut anims: Vec<_> = data.anim_lengths.iter().filter(|(k, _)| k.contains("Mantle") || k.contains("Blink") || k.contains("Slide") || k.contains("Land") || k.contains("Jump")).collect();
     anims.sort_by(|a, b| a.0.cmp(b.0));
     println!("{} player anims; motion-related: {anims:?}", data.anim_lengths.len());
+    if std::env::var_os("ALL_ANIMS").is_some() {
+        let mut all: Vec<_> = data.anim_lengths.keys().collect();
+        all.sort();
+        println!("ALL {}", all.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" "));
+    }
     println!("blink sound events: {:?}", data.blink.sound_events);
     let t = std::time::Instant::now();
     let snd = dis_data::sounds::load_sounds(&install, &data.blink.sound_events);
@@ -21,6 +26,20 @@ fn main() {
     println!("effects in {:?}: {} (lens distance {}): {}", t.elapsed(), fx.systems.len(), fx.lens_distance, names.join(" "));
     for w in &fx.warnings {
         println!("effect warning: {w}");
+    }
+    let t = std::time::Instant::now();
+    match dis_data::viewmodel::load_viewmodel(&install) {
+        Ok(vm) => println!(
+            "viewmodel in {:?}: arms {} verts (diffuse {:?}, normal {:?}), sword {:?}, {} anims, warnings {:?}",
+            t.elapsed(),
+            vm.arms.mesh.vertices.len(),
+            vm.arms.diffuse.as_ref().map(|t| (t.width, t.height)),
+            vm.arms.normal.as_ref().map(|t| (t.width, t.height)),
+            vm.sword.as_ref().map(|s| (s.mesh.vertices.len(), s.diffuse.is_some(), s.normal.is_some())),
+            vm.anims.len(),
+            vm.warnings
+        ),
+        Err(e) => println!("viewmodel error: {e}"),
     }
     for w in &snd.warnings {
         println!("sound warning: {w}");

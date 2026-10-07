@@ -1876,6 +1876,7 @@ name = "dis_data"
 version = "0.1.0"
 dependencies = [
  "cascade",
+ "edge_anim",
  "upk",
  "wwise",
 ]
@@ -1947,6 +1948,14 @@ name = "dpi"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
+
+[[package]]
+name = "edge_anim"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "upk",
+]
 
 [[package]]
 name = "either"
@@ -4051,7 +4060,9 @@ dependencies = [
  "cascade",
  "dis_data",
  "dis_motion",
+ "edge_anim",
  "glam",
+ "upk",
 ]
 
 [[package]]
