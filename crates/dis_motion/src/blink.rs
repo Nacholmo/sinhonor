@@ -356,13 +356,9 @@ impl Blink {
             if world.blink_blocked(goal) {
                 return true;
             }
-            let next = pawn.pos + dir * sub;
-            // The game moves without a collision test here (targeting already validated the
-            // path); hosts with looser geometry get a safety check instead of tunnelling.
-            if world.overlaps(next, pawn.half) {
-                return true;
-            }
-            pawn.pos = next;
+            // Like the game, move without a collision test: targeting already validated the
+            // destination, and the body may pass over low obstacles on the way.
+            pawn.pos += dir * sub;
             if (goal - pawn.pos).length() > dist || (self.touched_pawn && stop_at_pawn) {
                 return true;
             }

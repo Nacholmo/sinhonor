@@ -219,11 +219,13 @@ impl Motion {
         for e in &blink_events {
             match e {
                 BlinkEvent::Released => {
-                    // The game switches to flying physics and crouches so low gaps fit.
+                    // The game switches to flying physics and crouches so low gaps fit. The target
+                    // stays the pawn-centre point found while aiming, so a crouched body arrives
+                    // with its feet higher, which is what lets blink reach ledges above you.
+                    self.pos = pawn.pos;
                     if !self.crouched {
                         self.set_crouched(world, true);
                     }
-                    self.pos = pawn.pos - Vec3::Z * (self.tuning.half_height - self.tuning.crouch_half_height);
                     pawn.pos = self.pos;
                     pawn.half = self.half();
                     self.state = MotionState::Blinking;

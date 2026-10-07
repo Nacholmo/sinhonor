@@ -211,6 +211,22 @@ fn blink_travels_to_wall_and_keeps_momentum() {
 }
 
 #[test]
+fn blink_while_crouched_stays_on_the_floor() {
+    let w = floor_world();
+    let mut m = Motion::new(tuning(), Vec3::ZERO, 0.0);
+    run(&mut m, &w, Input::default(), 0.3);
+    run(&mut m, &w, Input { crouch: true, ..Default::default() }, 0.05);
+    run(&mut m, &w, Input::default(), 0.2);
+    assert!(m.crouched);
+    m.pitch = -0.4; // aim at the floor a few metres ahead
+    run(&mut m, &w, Input { blink: true, ..Default::default() }, 0.3);
+    let evs = run(&mut m, &w, Input::default(), 1.0);
+    assert!(evs.iter().any(|e| e.blink.contains(&BlinkEvent::Ended)));
+    assert!(m.feet().z.abs() < 1.0, "feet {}", m.feet().z);
+    assert_eq!(m.state, MotionState::Walking);
+}
+
+#[test]
 fn blink_range_is_squashed_sphere() {
     let w = floor_world();
     let mut m = Motion::new(tuning(), Vec3::ZERO, 0.0);
