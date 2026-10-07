@@ -39,6 +39,7 @@ which of Corvo's attribute sets is used.
 | Right mouse or F | hold to aim Blink, release to go |
 | 1 / 2 | Blink tier I / II |
 | M | mute game sounds |
+| G | Blink debug gizmos (target footprint and ground line) |
 | R / F1 / Esc | reset / help / free cursor (again to quit) |
 
 Sound effects (footsteps per surface, landings, mantle, slide, Blink and more) are decoded at startup from

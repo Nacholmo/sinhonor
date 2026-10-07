@@ -399,6 +399,25 @@ approximate the material graph:
 Flag `0x1` puts the payload in `<TextureFileCacheName>.tfc` at `offset`. Flag `0x10` means LZO in the package chunk
 format. Formats seen: DXT1, DXT5, ARGB8 and G8. `Textures.tfc` is 1.2 GB, so mips are read by byte range.
 
+### Matching the Blink marker to the game (2026-10-07, compared against in-game screenshots)
+
+- **Placement (native targeting display, `FUN_00bfa270`).** The *ground* system goes at the ground point found under the
+  target, rotated to the pawn's yaw with **pitch -90°**. Its local X therefore points down: its glow streaks travel up
+  (velocity -X), and its `-X` axis-locked cards lie flat on the floor. The *fall* system goes at the target point with
+  a zero rotator (a zero-initialised global). It is hidden unless the target is more than 15 units above the ground
+  point; since the target is the pawn centre, it normally shows. With a ledge, the mantle system replaces the ground one.
+  `m_pStandMesh` and friends (the `BlinkTargetingGoal` mesh) are unset in the shipped tweak.
+- **LOD matters.** Both systems have `LODDistances = [0, 256]`. Beyond 2.56 m the engine uses LOD 1, where the
+  velocity-aligned glow-streak emitter spawns at 15/s (0 at LOD 0). Those streaks *are* the vertical beam. The runtime
+  now loads every LOD level and picks one by camera distance.
+- **Velocity alignment.** Sprite Y runs along the velocity and X across it. `SizeMultiplyVelocity` sets
+  `size = base * speed * multiplier` per axis, with no clamping.
+- **Glow material parameters.** `G_GlowPower` sharpens the radial falloff (exponent). `F_Fog_Intensity` scales brightness
+  (25 on `Blink_Glow_02`). `G_GlowColor` multiplies `Color`. Translucent materials use their `Opacity` scalar (or
+  `Color.a`). Diffuse textures with data only in red are masks, not red colour.
+- **Travel screen effect.** The game uses a radial blur with a dark tunnel vignette. The demo has a vignette driven by
+  Blink's blur and distortion parameters; the radial blur needs a post-process pass.
+
 ## 7. Status and next steps
 
 Done: `upk` (package, texture reader), `dis_data` (tuning, sound and effect loader), `dis_motion` (motion core and

@@ -4,6 +4,7 @@
 use crate::to_bevy;
 use bevy::asset::RenderAssetUsages;
 use bevy::image::Image;
+use bevy::pbr::{NotShadowCaster, NotShadowReceiver};
 use bevy::prelude::*;
 use bevy::render::mesh::{Indices, PrimitiveTopology};
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
@@ -51,7 +52,8 @@ impl FxWorld {
         let id = self.next_id;
         self.next_id += 1;
         let t = if attach == Attach::Camera { self.lens_transform() } else { transform };
-        self.live.push(Live { id, inst: Instance::new(def, t, id.wrapping_mul(0x9E37_79B9_7F4A_7C15)), attach });
+        let distance = (t.translation - self.camera.translation).length();
+        self.live.push(Live { id, inst: Instance::new_at_distance(def, t, id.wrapping_mul(0x9E37_79B9_7F4A_7C15), distance), attach });
         id
     }
 
@@ -76,6 +78,15 @@ impl FxWorld {
 /// Unreal-space transform at `pos` facing `yaw`.
 pub fn placed(pos: UVec3, yaw: f32) -> Affine3A {
     Affine3A::from_mat3_translation(Mat3::from_rotation_z(yaw), pos)
+}
+
+/// Unreal rotator (pitch -90, yaw): local X points straight down, Z along the yaw direction.
+pub fn pitched_down(pos: UVec3, yaw: f32) -> Affine3A {
+    let (s, c) = yaw.sin_cos();
+    let x = UVec3::new(0.0, 0.0, -1.0);
+    let y = UVec3::new(-s, c, 0.0);
+    let z = UVec3::new(c, s, 0.0);
+    Affine3A::from_mat3_translation(Mat3::from_cols(x, y, z), pos)
 }
 
 /// Camera basis in Unreal space: X forward, Y right, Z up.
@@ -108,10 +119,13 @@ pub fn update_fx(
 ) {
     let dt = time.delta_secs().min(0.1);
     let lens = fx.lens_transform();
+    let eye = fx.camera.translation;
     for l in fx.live.iter_mut() {
         if l.attach == Attach::Camera {
             l.inst.transform = lens;
         }
+        // Distance-based LOD, as the engine does (`LODDistances`).
+        l.inst.set_camera_distance((l.inst.transform.translation - eye).length());
         l.inst.update(dt);
     }
     fx.live.retain(|l| !l.inst.is_finished());
@@ -129,9 +143,9 @@ pub fn update_fx(
     let mut batches: HashMap<String, Batch> = HashMap::new();
     let mut new_materials = Vec::new();
     for l in &fx.live {
-        let def = &l.inst.def;
+        let defs = l.inst.emitter_defs();
         for p in l.inst.particles() {
-            let e = &def.emitters[p.emitter];
+            let e = &defs[p.emitter];
             if e.is_mesh {
                 continue;
             }
@@ -143,10 +157,11 @@ pub fn update_fx(
             let (sx, sy) = (p.size.x.abs() * SCALE * 0.5, p.size.y.abs() * SCALE * 0.5);
             let (a, b) = match e.alignment {
                 Some(Alignment::Velocity) => {
+                    // UE3 velocity alignment: Y along the velocity, X across it.
                     let v = to_bevy(p.velocity);
-                    let d = (v - fwd * v.dot(fwd)).normalize_or(right);
-                    let side = d.cross(fwd).normalize_or(up);
-                    (d * sx, side * sy)
+                    let d = (v - fwd * v.dot(fwd)).normalize_or(up);
+                    let side = d.cross(fwd).normalize_or(right);
+                    (side * sx, d * sy)
                 }
                 Some(Alignment::Axis(ax)) => {
                     let n = to_bevy(l.inst.transform.transform_vector3(ax.vec())).normalize_or(Vec3::Y);
@@ -177,10 +192,11 @@ pub fn update_fx(
             continue;
         }
         let image = images.add(image_from(&m));
+        // Tint alpha: an intensity for additive materials, an opacity for translucent ones.
         let t = m.tint;
-        let k = if m.blend == Blend::Additive { t[3].max(1.0) } else { 1.0 };
+        let (k, alpha) = if m.blend == Blend::Additive { (t[3].max(0.05), 1.0) } else { (1.0, t[3].clamp(0.0, 1.0)) };
         let handle = materials.add(StandardMaterial {
-            base_color: Color::LinearRgba(LinearRgba::new(t[0] * k, t[1] * k, t[2] * k, 1.0)),
+            base_color: Color::LinearRgba(LinearRgba::new(t[0] * k, t[1] * k, t[2] * k, alpha)),
             base_color_texture: Some(image),
             unlit: true,
             alpha_mode: if m.blend == Blend::Additive { AlphaMode::Add } else { AlphaMode::Blend },
@@ -210,7 +226,7 @@ pub fn update_fx(
             None => {
                 let h = meshes.add(mesh);
                 let mat = fx.materials[&name].clone();
-                commands.spawn((Mesh3d(h.clone()), MeshMaterial3d(mat), Transform::IDENTITY, NoFrustumCulling));
+                commands.spawn((Mesh3d(h.clone()), MeshMaterial3d(mat), Transform::IDENTITY, NoFrustumCulling, NotShadowCaster, NotShadowReceiver));
                 fx.batches.insert(name, h);
             }
         }

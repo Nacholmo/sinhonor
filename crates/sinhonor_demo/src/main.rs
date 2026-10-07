@@ -39,6 +39,7 @@ struct Sim {
     log: Vec<String>,
     look: Vec2,
     show_help: bool,
+    debug_gizmos: bool,
     /// This frame's motion events and movement, for the audio system.
     frame_events: StepEvents,
     frame_move: dis_motion::Vec3,
@@ -119,6 +120,11 @@ fn autopilot_fx_script() -> Vec<Step> {
     let fwd = MotionInput { move_axis: Vec2::new(0.0, 1.0), ..default() };
     let idle = MotionInput::default();
     vec![
+        Step { teleport: Some([-1500.0, 0.0, 0.0]), view: Some((0.0, -0.2)), ..step("to marker spot", 0.5, idle) },
+        Step { shot: true, ..step("blink marker on floor", 1.2, MotionInput { blink: true, ..idle }) },
+        Step { view: Some((0.0, -0.1)), shot: true, ..step("blink marker further", 0.6, MotionInput { blink: true, ..idle }) },
+        Step { shot: true, ..step("blink travel", 0.06, idle) },
+        step("release", 1.4, idle),
         Step { teleport: Some([200.0, -800.0, 0.0]), view: Some((-FRAC_PI_2, -0.6)), ..step("to gravel", 0.5, idle) },
         step("walk onto gravel", 1.1, fwd),
         Step { shot: true, ..step("gravel steps", 0.25, fwd) },
@@ -247,6 +253,7 @@ fn main() {
         log: Vec::new(),
         look: Vec2::ZERO,
         show_help: true,
+        debug_gizmos: false,
         frame_events: StepEvents::default(),
         frame_move: dis_motion::Vec3::ZERO,
     };
@@ -277,8 +284,8 @@ fn main() {
         .insert_resource(sfx)
         .insert_resource(fx::FxWorld::new(effects))
         .insert_resource(FxState::default())
-        .insert_resource(ClearColor(Color::srgb(0.55, 0.6, 0.66)))
-        .insert_resource(AmbientLight { color: Color::WHITE, brightness: 400.0, ..default() })
+        .insert_resource(ClearColor(Color::srgb(0.42, 0.46, 0.52)))
+        .insert_resource(AmbientLight { color: Color::srgb(0.75, 0.8, 0.9), brightness: 250.0, ..default() })
         .add_systems(Startup, (setup_scene, load_audio, grab_cursor.run_if(|a: Res<Autopilot>| a.steps.is_empty())))
         .add_systems(Update, (cursor_toggle, gather_look, simulate, play_sounds, fx_triggers, update_camera, fx::update_fx, draw_blink, update_hud).chain())
         .run();
@@ -286,19 +293,35 @@ fn main() {
 
 fn color_for(kind: Kind) -> Color {
     match kind {
-        Kind::Ground => Color::srgb(0.32, 0.33, 0.30),
-        Kind::Wall => Color::srgb(0.45, 0.40, 0.36),
-        Kind::Ledge => Color::srgb(0.62, 0.52, 0.38),
-        Kind::Stairs => Color::srgb(0.55, 0.55, 0.50),
-        Kind::Roof => Color::srgb(0.38, 0.30, 0.28),
+        Kind::Ground => Color::srgb(0.16, 0.15, 0.13),
+        Kind::Wall => Color::srgb(0.30, 0.27, 0.24),
+        Kind::Ledge => Color::srgb(0.36, 0.30, 0.23),
+        Kind::Stairs => Color::srgb(0.33, 0.32, 0.29),
+        Kind::Roof => Color::srgb(0.24, 0.19, 0.18),
         Kind::Guard => Color::srgb(0.65, 0.18, 0.15),
         Kind::Ladder => Color::srgb(0.75, 0.62, 0.20),
         Kind::Water => Color::srgba(0.15, 0.32, 0.45, 0.55),
-        Kind::Gravel => Color::srgb(0.42, 0.38, 0.33),
+        Kind::Gravel => Color::srgb(0.24, 0.21, 0.17),
     }
 }
 
-fn setup_scene(mut commands: Commands, sim: Res<Sim>, mut meshes: ResMut<Assets<Mesh>>, mut materials: ResMut<Assets<StandardMaterial>>) {
+/// Radial vignette: transparent centre, dark edges.
+fn vignette_image() -> Image {
+    use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+    let n = 256u32;
+    let mut px = Vec::with_capacity((n * n * 4) as usize);
+    for y in 0..n {
+        for x in 0..n {
+            let (u, v) = (x as f32 / (n - 1) as f32 * 2.0 - 1.0, y as f32 / (n - 1) as f32 * 2.0 - 1.0);
+            let d = (u * u * 0.8 + v * v).sqrt();
+            let a = ((d - 0.45) / 0.75).clamp(0.0, 1.0).powf(1.6);
+            px.extend_from_slice(&[0, 0, 0, (a * 255.0) as u8]);
+        }
+    }
+    Image::new(Extent3d { width: n, height: n, depth_or_array_layers: 1 }, TextureDimension::D2, px, TextureFormat::Rgba8UnormSrgb, bevy::asset::RenderAssetUsages::default())
+}
+
+fn setup_scene(mut commands: Commands, sim: Res<Sim>, mut meshes: ResMut<Assets<Mesh>>, mut materials: ResMut<Assets<StandardMaterial>>, mut images: ResMut<Assets<Image>>) {
     for p in &sim.level.pieces {
         let (a, b) = (to_bevy(p.min), to_bevy(p.max));
         let size = (b - a).abs();
@@ -313,19 +336,20 @@ fn setup_scene(mut commands: Commands, sim: Res<Sim>, mut meshes: ResMut<Assets<
         commands.spawn((Mesh3d(meshes.add(Cuboid::new(size.x, size.y, size.z))), MeshMaterial3d(material), Transform::from_translation(center)));
     }
     commands.spawn((
-        DirectionalLight { illuminance: 9000.0, shadows_enabled: true, ..default() },
+        DirectionalLight { illuminance: 4500.0, shadows_enabled: true, ..default() },
         Transform::from_xyz(30.0, 60.0, 20.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
     commands.spawn((
         Camera3d::default(),
         Projection::from(PerspectiveProjection { fov: sim.tuning.fov_deg.to_radians(), near: 0.05, ..default() }),
-        DistanceFog { color: Color::srgb(0.55, 0.6, 0.66), falloff: FogFalloff::Linear { start: 40.0, end: 160.0 }, ..default() },
+        DistanceFog { color: Color::srgb(0.42, 0.46, 0.52), falloff: FogFalloff::Linear { start: 30.0, end: 140.0 }, ..default() },
         Transform::default(),
         PlayerCam,
     ));
+    // Blink travel vignette: dark, soft-edged frame whose strength follows Blink's blur.
     commands.spawn((
         Node { position_type: PositionType::Absolute, left: Val::Px(0.0), right: Val::Px(0.0), top: Val::Px(0.0), bottom: Val::Px(0.0), ..default() },
-        BackgroundColor(Color::NONE),
+        ImageNode { image: images.add(vignette_image()), color: Color::NONE, ..default() },
         BlinkOverlay,
     ));
     commands.spawn((
@@ -441,8 +465,8 @@ fn simulate(
         if auto.t >= st.secs {
             let m = &sim.motion;
             println!(
-                "[autopilot] {:<18} state {:?} crouched {} pos ({:.0}, {:.0}, feet {:.0}) speed {:.0} blink {:?}",
-                st.name, m.state, m.crouched, m.pos.x, m.pos.y, m.feet().z, m.speed_2d(), m.blink.mode
+                "[autopilot] {:<18} state {:?} crouched {} pos ({:.0}, {:.0}, feet {:.0}) speed {:.0} blink {:?} fx blur {:.2} dist {:.2}",
+                st.name, m.state, m.crouched, m.pos.x, m.pos.y, m.feet().z, m.speed_2d(), m.blink.mode, m.blink.fx.blur, m.blink.fx.distortion
             );
             if st.shot {
                 if let Some(dir) = &auto.out {
@@ -470,6 +494,11 @@ fn simulate(
     }
     if keys.just_pressed(KeyCode::F1) {
         sim.show_help = !sim.show_help;
+    }
+    if keys.just_pressed(KeyCode::KeyG) {
+        sim.debug_gizmos = !sim.debug_gizmos;
+        let on = sim.debug_gizmos;
+        push_log(&mut sim, format!("blink debug gizmos {}", if on { "on" } else { "off" }));
     }
     let Sim { motion, level, .. } = &mut *sim;
     let before = motion.pos;
@@ -650,7 +679,8 @@ fn play_sounds(mut commands: Commands, time: Res<Time>, keys: Res<ButtonInput<Ke
 /// Which effects are running for ongoing motion states.
 #[derive(Resource, Default)]
 struct FxState {
-    marker: Option<(dis_data::effects::Fx, u64)>,
+    marker: Option<u64>,
+    fall_marker: Option<u64>,
     slide: Option<u64>,
     swim_timer: f32,
     prev_state: Option<MotionState>,
@@ -665,24 +695,33 @@ fn fx_triggers(time: Res<Time>, sim: Res<Sim>, mut sfx: ResMut<Sfx>, mut fxw: Re
     fxw.camera = fx::camera_basis(m.camera.eye, m.view_dir());
     let feet = m.feet();
 
-    // Blink targeting marker: the ground or fall variant, facing the player, at the target.
+    // Blink targeting display, as the native code places it: the ground effect at the ground
+    // point with the pawn's yaw and pitch -90 (its local X points down, so its streaks rise and
+    // its cards lie flat), and the fall effect at the target point with no rotation, shown while
+    // the target is more than 15 units above the ground point.
     match (m.blink.mode, m.blink.target) {
         (BlinkMode::Targeting, Some(t)) => {
-            let target_feet = t.point - dis_motion::Vec3::Z * m.half().z;
-            let kind = if target_feet.z - t.ground_point.z > 40.0 { Fx::BlinkFall } else { Fx::BlinkGround };
-            let xf = fx::placed(target_feet, m.yaw);
+            let ext_z = sim.tuning.blink.target_extent[2];
+            let ground = t.ground_point + dis_motion::Vec3::Z * ext_z;
+            let ground_xf = fx::pitched_down(ground, m.yaw);
+            let fall_xf = Affine3AId::from_translation(t.point);
             match st.marker {
-                Some((k, id)) if k == kind => fxw.set_transform(id, xf),
-                other => {
-                    if let Some((_, id)) = other {
-                        fxw.stop(id);
-                    }
-                    st.marker = Some((kind, fxw.spawn(kind, xf, fx::Attach::World)));
+                Some(id) => fxw.set_transform(id, ground_xf),
+                None => st.marker = Some(fxw.spawn(Fx::BlinkGround, ground_xf, fx::Attach::World)),
+            }
+            let show_fall = t.point.z - ground.z > 15.0;
+            match (st.fall_marker, show_fall) {
+                (Some(id), true) => fxw.set_transform(id, fall_xf),
+                (None, true) => st.fall_marker = Some(fxw.spawn(Fx::BlinkFall, fall_xf, fx::Attach::World)),
+                (Some(id), false) => {
+                    fxw.stop(id);
+                    st.fall_marker = None;
                 }
+                (None, false) => {}
             }
         }
         _ => {
-            if let Some((_, id)) = st.marker.take() {
+            for id in [st.marker.take(), st.fall_marker.take()].into_iter().flatten() {
                 fxw.stop(id);
             }
         }
@@ -746,14 +785,12 @@ fn fx_triggers(time: Res<Time>, sim: Res<Sim>, mut sfx: ResMut<Sfx>, mut fxw: Re
     st.shake.0 = (st.shake.0 - time.delta_secs()).max(0.0);
 }
 
-fn push_log(sim: &mut Sim, s: String) {
-    sim.log.push(s);
-    if sim.log.len() > 6 {
-        sim.log.remove(0);
-    }
-}
-
+/// Debug overlay for Blink targeting (toggle with G): the pawn footprint at the target and a
+/// line down to the ground point the targeting found.
 fn draw_blink(sim: Res<Sim>, mut gizmos: Gizmos) {
+    if !sim.debug_gizmos {
+        return;
+    }
     let b = &sim.motion.blink;
     if b.mode != BlinkMode::Targeting {
         return;
@@ -762,12 +799,20 @@ fn draw_blink(sim: Res<Sim>, mut gizmos: Gizmos) {
     let half = sim.motion.half();
     let feet = t.point - dis_motion::Vec3::Z * half.z;
     let color = if t.stop_at_pawn { Color::srgb(1.0, 0.3, 0.2) } else { Color::srgb(0.3, 0.9, 1.0) };
-    // The game's marker effect does the heavy lifting; keep a faint footprint and drop line.
-    gizmos.circle(Isometry3d::new(to_bevy(feet), Quat::from_rotation_arc(Vec3::Z, Vec3::Y)), half.x * SCALE, color.with_alpha(0.35));
-    gizmos.line(to_bevy(feet), to_bevy(t.ground_point), color.with_alpha(0.2));
+    gizmos.circle(Isometry3d::new(to_bevy(feet), Quat::from_rotation_arc(Vec3::Z, Vec3::Y)), half.x * SCALE, color);
+    gizmos.line(to_bevy(feet), to_bevy(t.ground_point), color.with_alpha(0.6));
+    gizmos.sphere(Isometry3d::from_translation(to_bevy(t.point)), 0.08, color);
 }
 
-fn update_camera(time: Res<Time>, sim: Res<Sim>, st: Res<FxState>, mut cams: Query<(&mut Transform, &mut Projection), With<PlayerCam>>, mut overlay: Query<&mut BackgroundColor, With<BlinkOverlay>>) {
+fn push_log(sim: &mut Sim, s: String) {
+    sim.log.push(s);
+    if sim.log.len() > 6 {
+        sim.log.remove(0);
+    }
+}
+
+
+fn update_camera(time: Res<Time>, sim: Res<Sim>, st: Res<FxState>, mut cams: Query<(&mut Transform, &mut Projection), With<PlayerCam>>, mut overlay: Query<&mut ImageNode, With<BlinkOverlay>>) {
     let Ok((mut tf, mut proj)) = cams.single_mut() else { return };
     let m = &sim.motion;
     let dir = m.view_dir();
@@ -784,10 +829,10 @@ fn update_camera(time: Res<Time>, sim: Res<Sim>, st: Res<FxState>, mut cams: Que
     if let Projection::Perspective(p) = &mut *proj {
         p.fov = m.camera.fov_deg.to_radians();
     }
-    if let Ok(mut bg) = overlay.single_mut() {
+    if let Ok(mut img) = overlay.single_mut() {
         let fx = m.blink.fx;
-        let a = (fx.distortion * 0.18 + fx.blur * 0.12).clamp(0.0, 0.45);
-        bg.0 = Color::srgba(0.35, 0.55, 0.9, a);
+        let a = (fx.blur * 1.8 + fx.distortion * 0.3).clamp(0.0, 1.0);
+        img.color = Color::srgba(1.0, 1.0, 1.0, a);
     }
 }
 
@@ -821,7 +866,7 @@ fn update_hud(sim: Res<Sim>, mut hud: Query<&mut Text, With<Hud>>) {
     }
     if sim.show_help {
         s.push_str(&format!(
-            "\nWASD move  Mouse look  Space jump/mantle  Ctrl/C crouch (sprint+crouch = slide)\nShift sprint  Alt walk  Q/E lean  RMB/F hold Blink, release to go  1/2 Blink tier\nR reset  M mute  F1 help  Esc free cursor / quit\n\nTuning read from {}\n{} warnings; run speed {:.0}, sprint {:.0}, jump {:.0}, gravity {:.0}",
+            "\nWASD move  Mouse look  Space jump/mantle  Ctrl/C crouch (sprint+crouch = slide)\nShift sprint  Alt walk  Q/E lean  RMB/F hold Blink, release to go  1/2 Blink tier\nR reset  M mute  G blink gizmos  F1 help  Esc free cursor / quit\n\nTuning read from {}\n{} warnings; run speed {:.0}, sprint {:.0}, jump {:.0}, gravity {:.0}",
             sim.source, sim.warnings, sim.tuning.run_speed, sim.tuning.sprint_speed, sim.tuning.jump_z, sim.tuning.gravity_z
         ));
     }
