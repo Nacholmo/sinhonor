@@ -23,7 +23,38 @@ range and stepping) is read **at runtime from your own installed copy** of Disho
 cargo run --release -p sinhonor_demo -- --game "/path/to/steamapps/common/Dishonored"
 ```
 
-`--game` defaults to the `DISHONORED_DIR` environment variable, then to common Steam library paths.
+`--game` defaults to the `DISHONORED_DIR` environment variable, then to common Steam library paths
+(including extra libraries listed in `libraryfolders.vdf`). `--difficulty easy|normal|hard|veryhard` selects
+which of Corvo's attribute sets is used.
+
+| Key | Action |
+|---|---|
+| WASD / mouse | move / look |
+| Space | jump, or mantle when a ledge is in reach |
+| Ctrl or C | crouch toggle; while sprinting: slide |
+| Shift / Alt | sprint / slow walk |
+| Q / E | lean |
+| Right mouse or F | hold to aim Blink, release to go |
+| 1 / 2 | Blink tier I / II |
+| R / F1 / Esc | reset / help / free cursor (again to quit) |
+
+`--autopilot <dir>` plays a scripted route (mantle, blink, ladder, rooftop blink, slide), prints the motion
+state at each checkpoint and writes screenshots to `<dir>`.
+
+## Using the motion kit in another game
+
+Implement `dis_motion::World` (a box sweep plus optional water, ladder and blink-blocker queries) over your
+physics, build `MotionTuning::from_game(&dis_data::load(..)?)`, and call `Motion::update(&world, &input, dt)`
+each frame. Read back `motion.camera.eye`, `motion.yaw` and `motion.pitch`, `motion.camera.roll` and `fov_deg`,
+plus `motion.blink.fx` for the lens effect. Coordinates are Unreal-style (Z up, cm). Convert at your boundary.
+
+## Tests
+
+```
+cargo test --workspace
+```
+
+One test uses your install when it can find it, and skips otherwise.
 
 ## Research notes
 

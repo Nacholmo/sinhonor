@@ -268,19 +268,78 @@ Parameter names the materials read: `BlinkDistancePercentage`, `BlinkStepProgres
 - The exact sideways axes used by the close-collision nudge (world Y versus aim-relative).
 - The ledge detector (`ad35e0` step-up mantle, `acd820` full mantle) belongs to the movement work below.
 
-## 6. Suggested order
+## 6. Player motion: where the data lives (2026-10-07)
 
-1. Rust UE3 package reader: header, LZO chunk decompression, name, import and export tables, tagged properties.
-   Write our own and use the UELib (MIT) and ue3-tools docs as references.
-2. Runtime INI reader for `Config/Default*.ini`.
-3. Read the blink tweak and default objects and the player state defaults from the packages at runtime.
-4. Behaviour (blink stepping and targeting, player states, LocoNew walking) comes from Ghidra on `Dishonored.exe` in
-   `context/`. Write it up here as prose and pseudocode in our own words, then reimplement it. Decompiled output is never committed.
-5. Edge animation decoder.
+All of this is read at runtime by `crates/dis_data`. Values are not repeated here.
 
-## 7. Credits
+**Corvo's tweak tree is in `Startup.upk`.** The root is `Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release` (class
+`DisTweaks_PlayerPawn`). It references sub-tweaks by object reference:
+- `m_pAttributeTweaks[0..3]` gives one `DisTweaks_PlayerPawn_Attributes` per difficulty (Easy, Normal, Hard, VeryHard).
+  Every attribute is a `DisAttribute` struct `{m_fBaseValue1_Easy .. m_fBaseValue4_VeryHard}`. Motion attributes:
+  `m_GroundSpeed`, `m_GroundSpeedSprint`, `m_GroundSpeedCrouch`, `m_GroundSpeedWalk`, `m_GroundSpeedSlowWalk`,
+  `m_WaterSpeed`, `m_AccelerationRate`, `m_GroundStrafeMultiplier{Run,Sneak,Sprint}`,
+  `m_GroundBackwardMultiplier{Run,Sneak,Sprint}`, `m_JumpZ`, `m_MaxSpeedBeforeFalling{Damage,Death}`,
+  `m_LandAnimRate` and `m_MantleAnimRate`.
+- `m_pMantleTweaks` and **`m_pMantleBlinkTweaks`** (a separate ledge-finder configuration used after a blink), class
+  `DisTweaks_PlayerPawn_Mantle`. Fields: line-check step, min and max edge height, low and medium thresholds, the
+  step-up option for low mantles, edge-face and slope angle limits, search distance, forward move, ledge-grab fall speeds.
+- `m_pCameraTweaks` holds the min and max view pitch.
+- The root object itself holds `m_fAirControl`, `m_fJumpImpulse`, `m_fSlideTime`, `m_fSlidePercentNotCancelable`,
+  `m_bSlideAllowReturnToSprint`, `m_fAutoCrouchTestDistance`, `m_fAutoCrouchMinCrawlDepth` and `m_fClimbingSpeed`.
+
+Other objects under `Twk_Pawn_DefaultPlayer` are fallback templates (`m_bOnlyUseAsFallback`); use the release tree instead.
+UELib's `obj list` misses the `Twk_Pawn_Corvo` objects; our reader finds them.
+
+**Pawn defaults (`DishonoredGame.upk`).** `Default__DishonoredPawn` and its `.CollisionCylinder` provide collision
+half-height, radius, `CrouchHeight`, `CrouchRadius`, `MaxStepHeight`, `BaseEyeHeight`, `MaxFallSpeed` and `LadderSpeed`.
+`Default__DishonoredPlayerPawn` overrides the radius values. From `Engine.upk`: `Default__Pawn.WalkableFloorZ`,
+`Default__PhysicsVolume.GroundFriction` and `Default__WaterVolume.FluidFriction`.
+
+**INI.** `DefaultGame.ini` sets `[Engine.WorldInfo] DefaultGravityZ`. `DefaultPlayerState.ini` sets the lean, swim, jump
+style, falling stun velocity and walk crouch-FOV options. `DefaultCamera.ini` sets the default FOV, bob and roll amounts,
+and the lean spring constants, angles, tilt and height ratio.
+
+**Animation lengths (`Startup.upk`).** Each `AnimSequence` export under the `Ply_*` AnimSets carries `SequenceName`,
+`SequenceLength` and `RateScale`. The demo paces mantle (low, medium, high, crouched variants), slide and landing from them.
+
+**Struct defaults.** A cooked `ScriptStruct` export ends with its default values as a tagged stream. For example,
+`DisTweaks_Blink.PowerAttributes_Blink` supplies the Blink fields that the per-level entries leave unset.
+
+**Jump (`StatePlayerMasterJump`, enter function, Ghidra).** Z velocity is set from the `m_JumpZ` attribute (or the
+carrying-corpse variant). The vertical velocity of the base the player stands on is added, then physics switches to Falling.
+`m_JumpStyle` selects other variants that use different attributes (power jump). `m_fJumpImpulse` is not the normal jump.
+
+### Fidelity of the current motion core
+
+| Part | Status |
+|---|---|
+| Blink targeting, range, pull-back, ground correction, stepping, end and cooldown, lens parameters | **Follows the native code** (§5). The sub-move adds an overlap safety check |
+| Jump velocity | **Follows the native code** (attribute `m_JumpZ`) |
+| All speeds, acceleration, air control, gravity, step height, collision sizes, mantle thresholds, slide timing, lean springs, swim | **Game values**, read at runtime |
+| Walking and falling integration | UE3 `CalcVelocity`-style model; Dishonored's own "LocoNew" path not traced yet |
+| Strafe and backward multipliers | Applied as a direction ellipse; the exact native blend is not traced |
+| Mantle finder and mantle motion | Modelled from the tweak fields and animation lengths; native edge-finder FSM not traced |
+| Slide | Speed bleeds from entry speed to crouch speed over `m_fSlideTime`, with a cancel window. Not traced |
+| Lean, bob, landing dip | Spring and procedural approximations; the game drives bob from `Ply_Nav_LocoCamera_at` (needs the Edge decoder) |
+| Ladder, swim | Simple models using the game's speeds and accelerations |
+| Agility (power jump, double jump) | Not implemented yet |
+
+## 7. Status and next steps
+
+Done: `upk` (package reader), `dis_data` (tuning loader), `dis_motion` (motion core and Blink, tests),
+`sinhonor_demo` (Bevy course with `--autopilot` verification).
+
+Next:
+1. Trace the native mantle edge finder (`DishonoredMantleEdgeFinderComponent`, the player-pawn ledge result at `+0x898`)
+   and the Slide and Leaning states. Replace the models above.
+2. Agility: `StatePlayerMasterJump` style variants and the `Attribute_*_PowerJump*` modifiers in `DefaultPlayer.ini`.
+3. Edge animation decoder, so camera bob and mantle camera motion come from the game's camera animations.
+4. A host adapter example: dropping `dis_motion` into another Rust game, in the mashup style.
+
+## 8. Credits
 
 UELib / UE Explorer (Eliot van Uytfanghe), UE Viewer (Konstantin Nosov / Gildor), ue3-tools and dishonored-toolkit
-(deadYokai), dishonoredrecompiled and dismod (ectrc), CodeRed-Generator (CodeRedModding), lzokay-native (MIT, local tooling), Ghidra (NSA, Apache-2.0).
+(deadYokai), dishonoredrecompiled and dismod (ectrc), CodeRed-Generator (CodeRedModding), lzokay-native (MIT), Ghidra (NSA, Apache-2.0).
+Runtime dependencies: [Bevy](https://bevyengine.org) and [glam](https://github.com/bitshifter/glam-rs) (MIT OR Apache-2.0).
 Structural references: [iw4L](https://github.com/vladtrc/iw4L), [gang-beasts-rust](https://github.com/muffinmxn/gang-beasts-rust),
 [benilla](https://github.com/samwhosung/benilla), [2010-rust-rewrite-mashup](https://github.com/chasmlol/2010-rust-rewrite-mashup).
