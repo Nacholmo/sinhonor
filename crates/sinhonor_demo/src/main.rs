@@ -220,9 +220,25 @@ fn setup_scene(mut commands: Commands, sim: Res<Sim>, mut meshes: ResMut<Assets<
     ));
 }
 
+/// Pointer lock where the windowing backend supports it (Wayland, macOS); X11 and Windows only
+/// support confining the cursor. Look input uses raw mouse motion either way.
+fn grab_mode() -> CursorGrabMode {
+    let wayland = cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some();
+    if wayland || cfg!(target_os = "macos") {
+        CursorGrabMode::Locked
+    } else {
+        CursorGrabMode::Confined
+    }
+}
+
 fn set_grab(window: &mut Window, grab: bool) {
-    window.cursor_options.grab_mode = if grab { CursorGrabMode::Locked } else { CursorGrabMode::None };
+    window.cursor_options.grab_mode = if grab { grab_mode() } else { CursorGrabMode::None };
     window.cursor_options.visible = !grab;
+    if grab && grab_mode() == CursorGrabMode::Confined {
+        // Keep the (hidden) cursor centred so a confined grab never pins it at an edge.
+        let center = Vec2::new(window.width(), window.height()) * 0.5;
+        window.set_cursor_position(Some(center));
+    }
 }
 
 fn grab_cursor(mut windows: Query<&mut Window, With<PrimaryWindow>>) {
@@ -242,6 +258,10 @@ fn cursor_toggle(keys: Res<ButtonInput<KeyCode>>, mouse: Res<ButtonInput<MouseBu
     }
     if mouse.just_pressed(MouseButton::Left) && w.cursor_options.grab_mode == CursorGrabMode::None {
         set_grab(&mut w, true);
+    }
+    // Losing focus (alt-tab) releases the grab; take it back when the window is focused and clicked.
+    if !w.focused && w.cursor_options.grab_mode != CursorGrabMode::None {
+        set_grab(&mut w, false);
     }
 }
 

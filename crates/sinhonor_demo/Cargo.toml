@@ -6,6 +6,6 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-bevy = "0.16"
+bevy = { version = "0.16", features = ["wayland"] }
 dis_data = { path = "../dis_data" }
 dis_motion = { path = "../dis_motion" }
