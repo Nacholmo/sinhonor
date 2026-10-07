@@ -6,6 +6,7 @@
 //! See `NOTES.md` for where each value lives and how it was identified.
 
 pub mod ini;
+pub mod effects;
 pub mod sounds;
 
 use ini::Ini;

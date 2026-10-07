@@ -94,6 +94,8 @@ pub struct Package {
     pub names: Vec<String>,
     pub imports: Vec<Import>,
     pub exports: Vec<Export>,
+    /// Lower-cased object path -> export index, built on first lookup.
+    path_index: std::sync::OnceLock<std::collections::HashMap<String, usize>>,
 }
 
 /// Object references inside a package: `> 0` is export `i - 1`, `< 0` is import `-i - 1`, 0 is none.
@@ -129,6 +131,7 @@ impl Package {
             imports: Vec::with_capacity(header.import_count),
             exports: Vec::with_capacity(header.export_count),
             data: Vec::new(),
+            path_index: std::sync::OnceLock::new(),
         };
 
         r.seek(header.name_offset);
@@ -207,7 +210,14 @@ impl Package {
     }
 
     pub fn find_export(&self, path: &str) -> Option<usize> {
-        (0..self.exports.len()).find(|&i| self.object_path(ObjRef::Export(i)).eq_ignore_ascii_case(path))
+        let index = self.path_index.get_or_init(|| {
+            let mut m = std::collections::HashMap::with_capacity(self.exports.len());
+            for i in 0..self.exports.len() {
+                m.entry(self.object_path(ObjRef::Export(i)).to_ascii_lowercase()).or_insert(i);
+            }
+            m
+        });
+        index.get(&path.to_ascii_lowercase()).copied()
     }
 
     /// All exports whose class name matches.

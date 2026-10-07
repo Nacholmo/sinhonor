@@ -14,6 +14,14 @@ fn main() {
     let snd = dis_data::sounds::load_sounds(&install, &data.blink.sound_events);
     let bytes: usize = snd.ogg.values().map(Vec::len).sum();
     println!("sounds: {} cues, {} clips, {} KiB ogg, in {:?}", snd.cues.len(), snd.ogg.len(), bytes / 1024, t.elapsed());
+    let t = std::time::Instant::now();
+    let fx = dis_data::effects::load_effects(&install);
+    let mut names: Vec<_> = fx.systems.iter().map(|(k, v)| format!("{k:?}={}e", v.emitters.len())).collect();
+    names.sort();
+    println!("effects in {:?}: {} (lens distance {}): {}", t.elapsed(), fx.systems.len(), fx.lens_distance, names.join(" "));
+    for w in &fx.warnings {
+        println!("effect warning: {w}");
+    }
     for w in &snd.warnings {
         println!("sound warning: {w}");
     }

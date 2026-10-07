@@ -8,3 +8,4 @@ license.workspace = true
 [dependencies]
 upk = { path = "../upk" }
 wwise = { path = "../wwise" }
+cascade = { path = "../cascade" }

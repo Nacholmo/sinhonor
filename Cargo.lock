@@ -1875,6 +1875,7 @@ dependencies = [
 name = "dis_data"
 version = "0.1.0"
 dependencies = [
+ "cascade",
  "upk",
  "wwise",
 ]
@@ -4047,8 +4048,10 @@ name = "sinhonor_demo"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "cascade",
  "dis_data",
  "dis_motion",
+ "glam",
 ]
 
 [[package]]

@@ -94,15 +94,15 @@ impl Package {
             let height = r.i32()?.max(0) as u32;
             mips.push(MipRef { width, height, flags, size_on_disk, offset, inline });
         }
-        let tfc = match (tfc_dir, &cache) {
-            (Some(dir), Some(name)) => std::fs::read(dir.join(format!("{name}.tfc"))).ok(),
+        let tfc_path = match (tfc_dir, &cache) {
+            (Some(dir), Some(name)) => Some(dir.join(format!("{name}.tfc"))),
             _ => None,
         };
         for m in mips.iter().filter(|m| m.width <= max_size && m.width > 0) {
-            let raw = match (&m.inline, &tfc) {
+            let raw = match (&m.inline, &tfc_path) {
                 (Some(d), _) => d.clone(),
-                (None, Some(t)) if m.flags & BULK_SEPARATE_FILE != 0 => match t.get(m.offset..m.offset + m.size_on_disk) {
-                    Some(d) => d.to_vec(),
+                (None, Some(p)) if m.flags & BULK_SEPARATE_FILE != 0 => match read_range(p, m.offset, m.size_on_disk) {
+                    Some(d) => d,
                     None => continue,
                 },
                 _ => continue,
@@ -112,6 +112,16 @@ impl Package {
         }
         Err(Error::Unsupported("no readable mip".into()))
     }
+}
+
+/// Reads just `len` bytes at `offset` (texture caches are hundreds of MB).
+fn read_range(path: &Path, offset: usize, len: usize) -> Option<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    f.seek(SeekFrom::Start(offset as u64)).ok()?;
+    let mut buf = vec![0u8; len];
+    f.read_exact(&mut buf).ok()?;
+    Some(buf)
 }
 
 /// One compressed chunk: tag, block size, total sizes, block table, LZO blocks.
