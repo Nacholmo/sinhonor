@@ -8,6 +8,7 @@
 
 mod props;
 mod reader;
+pub mod skelmesh;
 pub mod texture;
 
 pub use props::{lookup, Property, Value};

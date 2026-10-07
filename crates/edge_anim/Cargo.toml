@@ -1,0 +1,12 @@
+[package]
+name = "edge_anim"
+description = "Decoder for Sony Edge animation data as cooked into Dishonored"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+glam.workspace = true
+
+[dev-dependencies]
+upk = { path = "../upk" }

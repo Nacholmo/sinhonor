@@ -98,7 +98,11 @@ impl Package {
             (Some(dir), Some(name)) => Some(dir.join(format!("{name}.tfc"))),
             _ => None,
         };
-        for m in mips.iter().filter(|m| m.width <= max_size && m.width > 0) {
+        // Prefer the largest mip within `max_size`; textures cooked with only a large top mip
+        // are decoded at the smallest readable size and box-filtered down.
+        let fits: Vec<&MipRef> = mips.iter().filter(|m| m.width <= max_size && m.width > 0).collect();
+        let oversized: Vec<&MipRef> = mips.iter().filter(|m| m.width > max_size).rev().collect();
+        for m in fits.into_iter().chain(oversized) {
             let raw = match (&m.inline, &tfc_path) {
                 (Some(d), _) => d.clone(),
                 (None, Some(p)) if m.flags & BULK_SEPARATE_FILE != 0 => match read_range(p, m.offset, m.size_on_disk) {
@@ -108,10 +112,30 @@ impl Package {
                 _ => continue,
             };
             let raw = if m.flags & BULK_LZO != 0 { decompress_chunk(&raw)? } else { raw };
-            return decode(format, m.width, m.height, &raw);
+            let mut img = decode(format, m.width, m.height, &raw)?;
+            while img.width > max_size && img.width > 1 && img.height > 1 {
+                img = halve(&img);
+            }
+            return Ok(img);
         }
         Err(Error::Unsupported("no readable mip".into()))
     }
+}
+
+/// 2x2 box filter.
+fn halve(img: &Rgba) -> Rgba {
+    let (w, h) = (img.width / 2, img.height / 2);
+    let mut px = vec![0u8; (w * h * 4) as usize];
+    for y in 0..h {
+        for x in 0..w {
+            for c in 0..4 {
+                let at = |xx: u32, yy: u32| img.pixels[((yy * img.width + xx) * 4 + c) as usize] as u32;
+                let sum = at(2 * x, 2 * y) + at(2 * x + 1, 2 * y) + at(2 * x, 2 * y + 1) + at(2 * x + 1, 2 * y + 1);
+                px[((y * w + x) * 4 + c) as usize] = (sum / 4) as u8;
+            }
+        }
+    }
+    Rgba { width: w, height: h, pixels: px }
 }
 
 /// Reads just `len` bytes at `offset` (texture caches are hundreds of MB).
