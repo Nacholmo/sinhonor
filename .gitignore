@@ -1,0 +1,35 @@
+# Whitelist: ignore everything, then allow only our own source, docs and build files.
+# Game files (the install symlink, cooked packages, configs), extracted or decompiled data,
+# RE databases and tool clones all stay local, in context/ or outside the repo.
+/*
+!/.gitignore
+!/NOTES.md
+!/README.md
+!/LICENSE*
+!/NOTICE
+!/THIRD-PARTY-LICENSES.txt
+!/Cargo.toml
+!/Cargo.lock
+!/rust-toolchain.toml
+!/rustfmt.toml
+!/clippy.toml
+!/.cargo/
+!/crates/
+!/docs/
+!/tools/
+
+# Never commit game-derived binaries or extracts, even inside whitelisted folders.
+*.upk
+*.u
+*.pck
+*.bnk
+*.tfc
+*.exe
+*.dll
+*.sav
+*.gpr
+*.rep
+target/
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
