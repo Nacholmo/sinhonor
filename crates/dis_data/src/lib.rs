@@ -215,16 +215,19 @@ pub fn find_install(explicit: Option<&Path>) -> Option<PathBuf> {
         }
     }
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-    let mut candidates = vec![
-        home.join(".local/share/Steam/steamapps/common/Dishonored"),
-        home.join(".steam/steam/steamapps/common/Dishonored"),
-        PathBuf::from("C:/Program Files (x86)/Steam/steamapps/common/Dishonored"),
+    let windows_steam = std::env::var_os("ProgramFiles(x86)")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("C:/Program Files (x86)"))
+        .join("Steam");
+    let steam_roots = [
+        home.join(".local/share/Steam"),
+        home.join(".steam/steam"),
+        home.join(".var/app/com.valvesoftware.Steam/data/Steam"),
+        windows_steam,
     ];
-    // Extra Steam libraries listed in libraryfolders.vdf.
-    for vdf in [
-        home.join(".local/share/Steam/steamapps/libraryfolders.vdf"),
-        home.join(".steam/steam/steamapps/libraryfolders.vdf"),
-    ] {
+    let mut candidates: Vec<PathBuf> = steam_roots.iter().map(|r| r.join("steamapps/common/Dishonored")).collect();
+    // Extra Steam libraries listed in libraryfolders.vdf (other drives on Windows).
+    for vdf in steam_roots.iter().map(|r| r.join("steamapps/libraryfolders.vdf")) {
         if let Ok(text) = std::fs::read_to_string(vdf) {
             for line in text.lines() {
                 let l = line.trim();

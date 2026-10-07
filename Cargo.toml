@@ -8,7 +8,9 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
-glam = "0.29"
+# Any glam from 0.29 to 0.32: the demo locks 0.29 with Bevy 0.16, and a host
+# engine on a newer Bevy (IW4L) resolves the same crates to its own glam.
+glam = ">=0.29, <0.33"
 lzokay-native = "0.1"
 
 [profile.dev]
