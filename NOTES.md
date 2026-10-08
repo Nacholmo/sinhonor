@@ -455,7 +455,7 @@ format. Formats seen: DXT1, DXT5, ARGB8 and G8. `Textures.tfc` is 1.2 GB, so mip
   - Bone quaternions are used as stored with glam's `q * v` (no W flip).
   - Rotator to matrix: `Rz(yaw) * Ry(-pitch) * Rx(-roll)`, 65536 units per turn.
   - The view is the `camera_jnt` bone: +X up, +Y right, -Z forward. The demo maps its +X to Bevy's +Y, +Y to +X.
-  - The sword sits at `handAttachment_R_jnt` × socket `RightHandWpn` (rotator `[0, 16384, 0]`) × the sword's own
+  - The sword sits at `handAttachment_R_jnt` × socket `RightHandWpn` (rotation read from the install) × the sword's own
     `RotOrigin`, minus its `MeshOrigin`.
   - The arm FOV of 75 is vertical; measured against the screenshots, the hand placement only matches that way.
   - The left hand's `Power` socket (`handAttachment_L_jnt`) is where casting effects attach.

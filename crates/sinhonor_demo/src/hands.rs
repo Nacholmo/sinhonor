@@ -238,7 +238,7 @@ pub fn setup_hands(
         prev_state: MotionState::Walking,
         prev_blink: BlinkMode::Idle,
         landing: 0.0,
-        sword_socket: rotator(asset_socket.unwrap_or([0, 16384, 0])) * sword_origin,
+        sword_socket: asset_socket.map_or(Mat4::IDENTITY, rotator) * sword_origin,
         attached_fx: Vec::new(),
         visible: true,
         vm,

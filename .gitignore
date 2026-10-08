@@ -3,6 +3,7 @@
 # RE databases and tool clones all stay local, in context/ or outside the repo.
 /*
 !/.gitignore
+!/AGENTS.md
 !/NOTES.md
 !/README.md
 !/LICENSE*
@@ -21,14 +22,47 @@
 # Never commit game-derived binaries or extracts, even inside whitelisted folders.
 *.upk
 *.u
+*.ff
+*.iwd
+*.iwi
+*.gsc
 *.pck
 *.bnk
 *.tfc
+*.wem
+*.xex
 *.exe
 *.dll
 *.sav
 *.gpr
 *.rep
+*.ogg
+*.wav
+*.pcm
+*.mp3
+*.flac
+*.mp4
+*.webm
+*.bik
+*.png
+*.jpg
+*.jpeg
+*.pam
+*.dds
+*.tga
+*.psk
+*.psa
+*.fbx
+*.obj
+*.gltf
+*.glb
+*.zip
+*.7z
+*.tar
+*.gz
+**/iw4l-artifacts/
+# Approved small JPEG screenshots must be deliberately force-added under docs/screenshots/.
+# Approval of each image is required in the current session (see AGENTS.md).
 target/
 
 # graft's local graph cache — regenerable, not committed (run `graft build`).
