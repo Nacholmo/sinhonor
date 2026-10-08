@@ -100,6 +100,8 @@ pub struct Hands {
     /// Joints the left-hand power animations drive (the left arm and fingers).
     left_joints: Vec<bool>,
     arms_mesh: Handle<Mesh>,
+    arms_material: Handle<StandardMaterial>,
+    tattoo_strength: f32,
     sword_mesh: Option<Handle<Mesh>>,
     prev_state: MotionState,
     prev_blink: BlinkMode,
@@ -188,6 +190,8 @@ pub fn setup_hands(
         materials.add(StandardMaterial {
             base_color_texture: part.diffuse.as_ref().map(|t| images.add(image(t, true))),
             normal_map_texture: part.normal.as_ref().map(|t| images.add(image(t, false))),
+            emissive_texture: part.tattoo_emissive.as_ref().map(|t| images.add(image(t, false))),
+            emissive: if part.tattoo_emissive.is_some() { LinearRgba::new(part.power_color[0] * 0.2, part.power_color[1] * 0.2, part.power_color[2] * 0.2, 1.0) } else { LinearRgba::BLACK },
             perceptual_roughness: 0.75,
             reflectance: 0.25,
             cull_mode: None,
@@ -198,7 +202,7 @@ pub fn setup_hands(
     let arms_mesh = meshes.add(static_mesh(&vm.arms));
     let arms_mat = material(&vm.arms, &mut materials, &mut images);
     let layer = RenderLayers::layer(LAYER);
-    commands.spawn((Mesh3d(arms_mesh.clone()), MeshMaterial3d(arms_mat), Transform::IDENTITY, NoFrustumCulling, layer.clone()));
+    commands.spawn((Mesh3d(arms_mesh.clone()), MeshMaterial3d(arms_mat.clone()), Transform::IDENTITY, NoFrustumCulling, layer.clone()));
     let sword_mesh = vm.sword.as_ref().map(|s| {
         let h = meshes.add(static_mesh(s));
         let mat = material(s, &mut materials, &mut images);
@@ -209,6 +213,7 @@ pub fn setup_hands(
         Camera3d::default(),
         // Both cameras must share the HDR target for load-preserving compositing.
         Camera { order: 1, hdr: true, clear_color: ClearColorConfig::None, ..default() },
+        bevy::core_pipeline::prepass::DepthPrepass,
         bevy::core_pipeline::tonemapping::Tonemapping::ReinhardLuminance,
         Projection::from(PerspectiveProjection { fov: sim.tuning.fov_deg.to_radians(), near: 0.01, ..default() }),
         crate::color_grading(),
@@ -227,6 +232,8 @@ pub fn setup_hands(
         left: Layer::default(),
         left_joints,
         arms_mesh,
+        arms_material: arms_mat,
+        tattoo_strength: 0.2,
         sword_mesh,
         prev_state: MotionState::Walking,
         prev_blink: BlinkMode::Idle,
@@ -288,6 +295,7 @@ pub fn update_hands(
     sim: Res<crate::Sim>,
     hands: Option<ResMut<Hands>>,
     mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
     mut lights: Query<&mut Transform, With<ViewmodelLight>>,
     mut cams: Query<&mut Projection, With<ViewmodelCamera>>,
     mut fx: ResMut<crate::fx::FxWorld>,
@@ -298,6 +306,17 @@ pub fn update_hands(
     }
     let dt = time.delta_secs().min(0.1);
     let m = &sim.motion;
+    let target_glow = match m.blink.mode {
+        BlinkMode::Targeting => 0.65,
+        BlinkMode::Travelling => 1.0,
+        BlinkMode::Cooldown => 0.2 + 0.45 * (1.0 - m.blink.fx.cooldown_time / sim.tuning.blink.levels[m.blink.level].cooldown_time.max(0.001)).clamp(0.0, 1.0),
+        _ => 0.2,
+    };
+    h.tattoo_strength += (target_glow - h.tattoo_strength) * (1.0 - (-dt * 14.0).exp());
+    if let Some(material) = materials.get_mut(&h.arms_material).filter(|_| h.vm.arms.tattoo_emissive.is_some()) {
+        let c = h.vm.arms.power_color;
+        material.emissive = LinearRgba::new(c[0] * h.tattoo_strength, c[1] * h.tattoo_strength, c[2] * h.tattoo_strength, 1.0);
+    }
 
     // --- choose the base (sword hand + body) and left-hand (power) animations ---
     let speed = m.speed_2d();

@@ -365,9 +365,14 @@ emitter time.
 **Modules used by the motion effects:** Required (material, alignment `PSA_Velocity`, local space, kill on
 deactivate, duration, loops, delay), Spawn (rate, rate scale, bursts), Lifetime, Size, SizeMultiplyLife,
 SizeMultiplyVelocity, Color, ColorOverLife, ColorScaleOverLife, Velocity (with radial), VelocityOverLifetime,
-Acceleration, Location, LocationPrimitiveCylinder, Rotation, RotationRate, RotationRateMultiplyLife, OrientationAxisLock.
-Not handled yet: SubUV flipbooks, Orbit, Collision, VelocityInheritParent, and **mesh emitters** (TypeDataMesh: debris,
-the Blink swirl cylinders), which need static-mesh import.
+Acceleration, Location, LocationPrimitiveCylinder, Rotation, RotationRate, RotationRateMultiplyLife, OrientationAxisLock,
+TypeDataMesh, MeshRotation and MeshRotationRate.
+Not handled yet: SubUV flipbooks, Orbit, Collision and VelocityInheritParent.
+
+**Mesh particles (2026-10-08).** The static-mesh reader decodes cooked LOD 0 positions, half/full UVs, BGRA vertex
+colours and 16-bit triangle indices. It skips collision data and section metadata. The renderer uses the original
+geometry with each particle's three-axis size and rotation, including the emitter's pre-rotation and local-space
+transform. No extracted geometry ships in the repository.
 
 **Where the effects are.**
 - Blink targeting markers: `Twk_Blink.m_pGroundPS`, `m_pLowFallPS`/`m_pHighFallPS` and `m_pMantlePS`, all in
@@ -387,6 +392,13 @@ approximate the material graph:
 - glow materials are a radial glow modulated by their noise texture;
 - the `Color` vector parameter tints.
 
+Imported materials and textures are resolved by object path against the loaded packages. In particular, the hand's
+`Startup.upk` effects import the Blink glow material from `DishonoredGame.upk`; caching a generic fallback under that
+asset name gave both the hand and marker the wrong glow. An unresolved import now remains unresolved rather than
+poisoning the shared material cache. Sprite textures use linear filtering. A depth-prepass particle shader fades
+coverage over 2.5 cm at the hand and 10 cm in the world to soften intersections with opaque surfaces. These distances
+and the compact radial glow profile are rendering approximations, not recovered shader constants.
+
 **Textures.** After a `Texture2D`'s properties: an empty `SourceArt` bulk record, then the mip count, then per mip
 `{flags, elementCount, sizeOnDisk, offset}`, the payload (inline unless flag `0x1`), and the mip's width and height.
 Flag `0x1` puts the payload in `<TextureFileCacheName>.tfc` at `offset`. Flag `0x10` means LZO in the package chunk
@@ -405,7 +417,9 @@ format. Formats seen: DXT1, DXT5, ARGB8 and G8. `Textures.tfc` is 1.2 GB, so mip
   now loads every LOD level and picks one by camera distance.
 - **Velocity alignment.** Sprite Y runs along the velocity and X across it. `SizeMultiplyVelocity` sets
   `size = base * speed * multiplier` per axis, with no clamping.
-- **Glow material parameters.** `G_GlowPower` sharpens the radial falloff (exponent). `F_Fog_Intensity` scales brightness
+- **Square alignment.** `PSA_Square` uses the X size for both sprite axes, including axis-locked cards. Using the
+  independent Y size stretched the rotating glow cards into the broad bars seen in the earlier demo.
+- **Glow material parameters.** `G_GlowPower` sharpens the approximated radial falloff. `F_Fog_Intensity` scales brightness
   (25 on `Blink_Glow_02`). `G_GlowColor` multiplies `Color`. Translucent materials use their `Opacity` scalar (or
   `Color.a`). Diffuse textures with data only in red are masks, not red colour.
 - **Travel screen effect.** The game uses a radial blur with a dark tunnel vignette. The demo now uses an embedded fullscreen lens pass driven by
@@ -452,6 +466,10 @@ format. Formats seen: DXT1, DXT5, ARGB8 and G8. `Textures.tfc` is 1.2 GB, so mip
   (`hand_L_jnt`, on the back of the hand) in the foreground group. Each is a translucent dirt-smoke emitter plus two
   additive gold `Blink_Glow_02` cards. The swim sequences put `Player_Swimming` on the middle fingers the same way.
   `dis_data::viewmodel` reads every particle notify generically, and the demo simulates the effects in view space.
+- **Tattoo emission (2026-10-08).** The arm material supplies `D_Diffuse`, `D_Diffuse_No_Tatoo`, the blue power-hand
+  region in `SP_SpecPower`, and `Power_Hand_Color`. The renderer derives an emissive mask from the diffuse difference,
+  thresholds compression noise and gates it with that region. This keeps the gold emblem on the deforming skin.
+  Brightness is smoothed between idle, targeting, travel and cooldown; that envelope approximates the game look.
 - **Blink travel streaks.** `Twk_Blink.m_pCooldownEffect` is a camera-lens effect whose system is
   `vrosier_TestFX2.Blink2.Blink_PlayerWind_01`: 12 velocity-aligned glow streaks and 5 soft flashes thrown backwards
   past the camera. That's the white streaking in screenshots of the travel; the radial blur is the post-process
@@ -477,7 +495,7 @@ Next:
    and the Slide and Leaning states. Replace the models above.
 2. Agility: `StatePlayerMasterJump` style variants and the `Attribute_*_PowerJump*` modifiers in `DefaultPlayer.ini`.
 3. Drive camera bob and mantle camera motion from the game's camera animations (the Edge decoder now exists).
-4. Static-mesh import for mesh particle emitters (Blink swirls, slide debris); SubUV flipbooks; Blink's screen
+4. SubUV flipbooks and original particle material scrolling/distortion; Blink's screen
    post-process material (`BlinkDistancePercentage` and the other parameters) instead of the approximate lens shader.
 5. A host adapter example: dropping `dis_motion` into another Rust game, in the mashup style.
 

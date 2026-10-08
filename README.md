@@ -97,16 +97,17 @@ The movement needs only the tuning. Everything else is optional and skipped with
 - **Sword**: held on the `RightHandWpn` socket. It's put away for the unarmed (`Empty_*`) swim animations.
 - **Drawing**: the arms and sword are skinned on the CPU and drawn by a second camera on their own layer, so they never clip into walls.
 - **Effects from the animations**: when Blink is cast, the gold glow and smoke on the back of the hand come from the animations themselves. `Powers_Cast_Blink_In` and `_Loop` trigger `Ps_Tattoo_Glow_02` on the hand's `Tattoo` socket at 0 s (so it re-fires on every 0.33 s loop while you aim), and `_Out` triggers `Ps_Tattoo_Glow_04`. The swim strokes put splashes on the fingers the same way. The demo reads every one of these notifies, so the effects keep the game's timing.
+- **Glowing tattoo**: a mask derived at runtime from the installed arm textures follows the skin's UVs and uses the material's gold power-hand colour. Its brightness rises while targeting and fades after travel. Depth fading softens smoke and glow cards where they meet the hand.
 
 **Sound.** Wwise sound packages are parsed and their Vorbis audio converted to Ogg in memory. Footsteps follow your gait and the surface under you (stone, wood, gravel, water, roof tiles, metal). Set `SINHONOR_LOG_SFX=1` to print each cue as it plays.
 
-**Effects.** The game's Cascade particle systems are simulated and drawn as sprites, at the game's distance LODs. They include the Blink marker and arrival streaks, slide dust, landing dust, footstep puffs on gravel and water, water splash, swimming wake, and drips on the lens after you climb out of water. Hard landings also shake the camera.
+**Effects.** The game's Cascade particle systems are simulated and drawn as sprites and mesh particles, at the game's distance LODs. They include the Blink marker's original swirl meshes and arrival streaks, slide dust, landing dust, footstep puffs on gravel and water, water splash, swimming wake, and drips on the lens after you climb out of water. Square sprites retain their square shape, including axis-locked glow cards. Hard landings also shake the camera.
 
 **What's still approximate:**
 
 - **Not yet exact**: walking uses UE3's standard `CalcVelocity` model, not Dishonored's own "LocoNew" walking path. The mantle's ledge finder, the slide and the lean are modelled from the tweak values and animation lengths.
 - **Camera**: the head bob is procedural. The game drives it from a camera animation (`Ply_Nav_LocoCamera_at`), which the Edge decoder can now read but nothing plays yet.
-- **Effects**: mesh-particle emitters (the Blink swirl rings) and SubUV flipbooks aren't done. The Blink lens shader is an approximation driven by the game's curves, not a reconstruction of its original material. The world camera uses HDR bloom.
+- **Effects**: SubUV flipbooks and the original materials' scrolling/distortion graphs aren't done. Mesh particles use cooked LOD 0 geometry, UVs, vertex colours and rotation curves. The particle materials, tattoo brightness and Blink lens shader approximate the look; they do not reconstruct the original shaders. The world camera uses HDR bloom.
 - **Smoke**: the hand smoke is simulated relative to the camera, so it doesn't trail behind you as it does in the game.
 - **Agility** (power jump, double jump) isn't in yet.
 
@@ -187,7 +188,7 @@ crates/dis_motion/     the motion kit: engine-agnostic, depends only on glam
   src/tuning.rs        MotionTuning, built from the game's values
   tests/motion.rs      one test per move, by scripted input
 crates/dis_data/       finds the install and loads tuning, sounds, effects, arms and textures from it
-crates/upk/            UE3 package reader: LZO, names, imports, exports, tagged properties, textures, skeletal meshes
+crates/upk/            UE3 package reader: LZO, names, imports, exports, tagged properties, textures, skeletal/static meshes
 crates/edge_anim/      Sony Edge animation decoder
 crates/wwise/          Wwise sound packages (AKPK, bank v65) to Ogg
 crates/cascade/        UE3 Cascade particle systems: loading, materials and simulation

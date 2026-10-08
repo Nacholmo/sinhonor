@@ -4,7 +4,9 @@
 use crate::to_bevy;
 use bevy::asset::RenderAssetUsages;
 use bevy::image::Image;
-use bevy::pbr::{NotShadowCaster, NotShadowReceiver};
+use bevy::pbr::{ExtendedMaterial, MaterialExtension, NotShadowCaster, NotShadowReceiver};
+use bevy::asset::{load_internal_asset, weak_handle};
+use bevy::render::render_resource::{AsBindGroup, ShaderRef};
 use bevy::prelude::*;
 use bevy::render::mesh::{Indices, PrimitiveTopology};
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
@@ -15,6 +17,29 @@ use dis_motion::Vec3 as UVec3;
 use glam::{Affine3A, Mat3};
 use std::collections::HashMap;
 use std::sync::Arc;
+
+const PARTICLE_SHADER: Handle<Shader> = weak_handle!("b9a6a572-8b92-43bd-b944-45529489e98b");
+
+/// Fade particles into opaque surfaces, especially the back of the power hand.
+#[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
+pub struct ParticleFade {
+    #[uniform(100)]
+    distance: Vec4,
+}
+
+impl MaterialExtension for ParticleFade {
+    fn fragment_shader() -> ShaderRef { PARTICLE_SHADER.into() }
+}
+
+pub type ParticleMaterial = ExtendedMaterial<StandardMaterial, ParticleFade>;
+
+pub struct FxPlugin;
+impl Plugin for FxPlugin {
+    fn build(&self, app: &mut App) {
+        load_internal_asset!(app, PARTICLE_SHADER, "particle_fade.wgsl", Shader::from_wgsl);
+        app.add_plugins(MaterialPlugin::<ParticleMaterial>::default());
+    }
+}
 
 const SCALE: f32 = crate::SCALE;
 
@@ -39,7 +64,7 @@ pub struct FxWorld {
     pub effects: Effects,
     pub live: Vec<Live>,
     next_id: u64,
-    materials: HashMap<String, Handle<StandardMaterial>>,
+    materials: HashMap<(bool, String), Handle<ParticleMaterial>>,
     /// Per-material meshes, keyed by (viewmodel layer?, material).
     batches: HashMap<(bool, String), Handle<Mesh>>,
     /// Camera basis (Unreal space), updated each frame for lens effects.
@@ -114,13 +139,15 @@ pub fn camera_basis(eye: UVec3, forward: UVec3) -> Affine3A {
 }
 
 fn image_from(m: &cascade::SpriteMaterial) -> Image {
-    Image::new(
+    let mut image = Image::new(
         Extent3d { width: m.width, height: m.height, depth_or_array_layers: 1 },
         TextureDimension::D2,
         m.rgba.clone(),
         TextureFormat::Rgba8UnormSrgb,
         RenderAssetUsages::default(),
-    )
+    );
+    image.sampler = bevy::image::ImageSampler::linear();
+    image
 }
 
 /// Advances every live effect and rebuilds the per-material meshes.
@@ -130,7 +157,7 @@ pub fn update_fx(
     mut fx: ResMut<FxWorld>,
     cams: Query<&GlobalTransform, With<crate::PlayerCam>>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: ResMut<Assets<ParticleMaterial>>,
     mut images: ResMut<Assets<Image>>,
 ) {
     let dt = time.delta_secs().min(0.1);
@@ -166,15 +193,31 @@ pub fn update_fx(
         let defs = l.inst.emitter_defs();
         for p in l.inst.particles() {
             let e = &defs[p.emitter];
-            if e.is_mesh {
-                continue;
-            }
             let Some(mat) = &e.material else { continue };
-            if !fx.materials.contains_key(&mat.name) {
-                new_materials.push(mat.clone());
+            if !fx.materials.contains_key(&(vm, mat.name.clone())) {
+                new_materials.push((vm, mat.clone()));
             }
             let c = to_bevy(p.pos);
-            let (sx, sy) = (p.size.x.abs() * SCALE * 0.5, p.size.y.abs() * SCALE * 0.5);
+            let col = [p.color[0].max(0.0), p.color[1].max(0.0), p.color[2].max(0.0), p.color[3].clamp(0.0, 1.0)];
+            if e.is_mesh {
+                let Some(mesh) = &e.mesh else { continue };
+                let batch = batches.entry((vm, mat.name.clone())).or_insert_with(|| Batch { pos: vec![], uv: vec![], col: vec![], nrm: vec![], idx: vec![] });
+                let base = batch.pos.len() as u32;
+                for vertex in &mesh.vertices {
+                    let local = glam::Vec3::from(vertex.position) * p.mesh_size;
+                    batch.pos.push(to_bevy(p.pos + p.mesh_rotation * local).into());
+                    batch.uv.push(vertex.uv);
+                    batch.col.push(std::array::from_fn(|i| col[i] * vertex.color[i]));
+                    batch.nrm.push((-fwd).into());
+                }
+                // Unreal -> Bevy swaps two axes, reversing triangle winding.
+                for tri in mesh.indices.chunks_exact(3) {
+                    batch.idx.extend_from_slice(&[base + tri[0], base + tri[2], base + tri[1]]);
+                }
+                continue;
+            }
+            let sx = p.size.x.abs() * SCALE * 0.5;
+            let sy = if e.square { sx } else { p.size.y.abs() * SCALE * 0.5 };
             let (a, b) = match e.alignment {
                 Some(Alignment::Velocity) => {
                     // UE3 velocity alignment: Y along the velocity, X across it.
@@ -195,7 +238,6 @@ pub fn update_fx(
                     ((right * co + up * s) * sx, (up * co - right * s) * sy)
                 }
             };
-            let col = [p.color[0].max(0.0), p.color[1].max(0.0), p.color[2].max(0.0), p.color[3].clamp(0.0, 1.0)];
             let b_ = batches.entry((vm, mat.name.clone())).or_insert_with(|| Batch { pos: vec![], uv: vec![], col: vec![], nrm: vec![], idx: vec![] });
             let base = b_.pos.len() as u32;
             for (corner, uv) in [(-a - b, [0.0, 1.0]), (a - b, [1.0, 1.0]), (a + b, [1.0, 0.0]), (-a + b, [0.0, 0.0])] {
@@ -207,15 +249,16 @@ pub fn update_fx(
             b_.idx.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
         }
     }
-    for m in new_materials {
-        if fx.materials.contains_key(&m.name) {
+    for (vm, m) in new_materials {
+        let key = (vm, m.name.clone());
+        if fx.materials.contains_key(&key) {
             continue;
         }
         let image = images.add(image_from(&m));
         // Tint alpha: an intensity for additive materials, an opacity for translucent ones.
         let t = m.tint;
-        let (k, alpha) = if m.blend == Blend::Additive { (t[3].max(0.05), 1.0) } else { (1.0, t[3].clamp(0.0, 1.0)) };
-        let handle = materials.add(StandardMaterial {
+        let (k, alpha) = if m.blend == Blend::Additive { (t[3].max(0.0), 1.0) } else { (1.0, t[3].clamp(0.0, 1.0)) };
+        let handle = materials.add(ParticleMaterial { base: StandardMaterial {
             base_color: Color::LinearRgba(LinearRgba::new(t[0] * k, t[1] * k, t[2] * k, alpha)),
             base_color_texture: Some(image),
             unlit: true,
@@ -224,8 +267,8 @@ pub fn update_fx(
             double_sided: true,
             fog_enabled: false,
             ..default()
-        });
-        fx.materials.insert(m.name.clone(), handle);
+        }, extension: ParticleFade { distance: Vec4::new(if vm { 0.025 } else { 0.1 }, 0.0, 0.0, 0.0) } });
+        fx.materials.insert(key, handle);
     }
     // Upload batches; materials with no particles this frame get an empty (degenerate) mesh.
     let keys: Vec<(bool, String)> = fx.batches.keys().cloned().chain(batches.keys().cloned()).collect::<std::collections::HashSet<_>>().into_iter().collect();
@@ -245,7 +288,7 @@ pub fn update_fx(
             }
             None => {
                 let h = meshes.add(mesh);
-                let mat = fx.materials[&key.1].clone();
+                let mat = fx.materials[&key].clone();
                 let layer = RenderLayers::layer(if key.0 { crate::hands::LAYER } else { 0 });
                 commands.spawn((Mesh3d(h.clone()), MeshMaterial3d(mat), Transform::IDENTITY, NoFrustumCulling, NotShadowCaster, NotShadowReceiver, layer));
                 fx.batches.insert(key, h);

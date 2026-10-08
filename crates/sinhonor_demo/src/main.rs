@@ -307,7 +307,7 @@ fn main() {
             }),
             ..default()
         }))
-        .add_plugins(blink_post::BlinkPostPlugin)
+        .add_plugins((blink_post::BlinkPostPlugin, fx::FxPlugin))
         .insert_resource(sim)
         .insert_resource(autopilot)
         .insert_resource(sfx)
@@ -496,6 +496,7 @@ fn setup_scene(
     commands.spawn((
         Camera3d::default(),
         Camera { hdr: true, ..default() },
+        bevy::core_pipeline::prepass::DepthPrepass,
         bevy::core_pipeline::tonemapping::Tonemapping::ReinhardLuminance,
         Bloom { intensity: 0.08, low_frequency_boost: 0.25, ..Bloom::OLD_SCHOOL },
         blink_post::BlinkLens::default(),
