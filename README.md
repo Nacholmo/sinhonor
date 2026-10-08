@@ -72,7 +72,7 @@ Blink reproduces the behaviour of the game's `DishonoredActivePowerComponent_Bli
 - **Travel**: on release, physics switches to flying, and if you're standing Corvo crouches so low gaps fit (the target stays the same point, so a crouched body arrives with its feet higher, which is how Blink reaches ledges above you). He then moves 1 m every 10 ms (about 100 m/s), in sub-moves of at most 50 cm, **without collision**: the targeting sweeps already made the path safe. Travel stops at the target, if it would pass it, or on touching a pawn.
 - **Arrival**: your velocity from before the blink is restored, so blink-jumping keeps momentum. Then comes the game's post-blink ledge check (a step-up or a full mantle, using `m_pMantleBlinkTweaks`) and an attempt to stand up.
 - **Cooldown**: 1 s, with the game's cooldown lens effect (`Twk_Blink_Cooldown`, white streaks thrown back past the camera) and a decaying wobble.
-- **Screen effect**: the game's warm-up wobble, travel distortion and blur curves (`m_fMoveBlurMaxStrength` and friends) drive the demo's vignette, a FOV punch and camera motion blur. Moving straight ahead at Blink speed, the blur streaks outward from a sharp centre, much like the game's radial blur.
+- **Screen effect**: the game's warm-up wobble, travel distortion and blur curves (`m_fMoveBlurMaxStrength` and friends) drive a dedicated lens pass with radial blur, a dark tunnel vignette, animated peripheral distortion and subtle colour separation, alongside the FOV punch. The aim point stays sharp, and the pass fades with the game's cooldown curve. HDR bloom softens the targeting glow; the arms and HUD remain crisp.
 
 ## Corvo's arms, sounds and effects (from your copy of Dishonored)
 
@@ -106,7 +106,7 @@ The movement needs only the tuning. Everything else is optional and skipped with
 
 - **Not yet exact**: walking uses UE3's standard `CalcVelocity` model, not Dishonored's own "LocoNew" walking path. The mantle's ledge finder, the slide and the lean are modelled from the tweak values and animation lengths.
 - **Camera**: the head bob is procedural. The game drives it from a camera animation (`Ply_Nav_LocoCamera_at`), which the Edge decoder can now read but nothing plays yet.
-- **Effects**: mesh-particle emitters (the Blink swirl rings), SubUV flipbooks and the real Blink post-process material aren't done. There's no bloom.
+- **Effects**: mesh-particle emitters (the Blink swirl rings) and SubUV flipbooks aren't done. The Blink lens shader is an approximation driven by the game's curves, not a reconstruction of its original material. The world camera uses HDR bloom.
 - **Smoke**: the hand smoke is simulated relative to the camera, so it doesn't trail behind you as it does in the game.
 - **Agility** (power jump, double jump) isn't in yet.
 
@@ -194,6 +194,7 @@ crates/cascade/        UE3 Cascade particle systems: loading, materials and simu
 crates/sinhonor_demo/  the Bevy test course
   src/main.rs          app, input, camera, sounds, effect triggers, HUD, autopilot
   src/hands.rs         Corvo's arms and sword: animation layers, CPU skinning, viewmodel camera
+  src/blink_post.rs     Blink radial blur and lens distortion render pass (embedded WGSL)
   src/fx.rs            particle rendering, in the world, on the lens and in the viewmodel
   src/level.rs         the test course, as data
 NOTES.md               research notes: formats, the game's motion and Blink, credits

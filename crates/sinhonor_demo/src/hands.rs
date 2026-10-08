@@ -154,9 +154,15 @@ pub fn setup_hands(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
     sim: Res<crate::Sim>,
+    world_camera: Query<Entity, With<crate::PlayerCam>>,
 ) {
     let Some(asset) = vm else { return };
     let Some(vm) = asset.0.lock().unwrap().take() else { return };
+    // Composite both HDR layers before tonemapping once, on the foreground camera.
+    // Keep the world's tonemapping when arms are unavailable and this camera is not spawned.
+    for camera in &world_camera {
+        commands.entity(camera).insert(bevy::core_pipeline::tonemapping::Tonemapping::None);
+    }
     let asset_socket = vm.sword_socket;
     // The sword mesh's own RotOrigin/MeshOrigin apply before the socket.
     let sword_origin = vm.sword.as_ref().map_or(Mat4::IDENTITY, |s| {
@@ -201,7 +207,9 @@ pub fn setup_hands(
     });
     commands.spawn((
         Camera3d::default(),
-        Camera { order: 1, clear_color: ClearColorConfig::None, ..default() },
+        // Both cameras must share the HDR target for load-preserving compositing.
+        Camera { order: 1, hdr: true, clear_color: ClearColorConfig::None, ..default() },
+        bevy::core_pipeline::tonemapping::Tonemapping::ReinhardLuminance,
         Projection::from(PerspectiveProjection { fov: sim.tuning.fov_deg.to_radians(), near: 0.01, ..default() }),
         crate::color_grading(),
         Transform::IDENTITY,

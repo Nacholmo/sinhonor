@@ -408,8 +408,11 @@ format. Formats seen: DXT1, DXT5, ARGB8 and G8. `Textures.tfc` is 1.2 GB, so mip
 - **Glow material parameters.** `G_GlowPower` sharpens the radial falloff (exponent). `F_Fog_Intensity` scales brightness
   (25 on `Blink_Glow_02`). `G_GlowColor` multiplies `Color`. Translucent materials use their `Opacity` scalar (or
   `Color.a`). Diffuse textures with data only in red are masks, not red colour.
-- **Travel screen effect.** The game uses a radial blur with a dark tunnel vignette. The demo has a vignette driven by
-  Blink's blur and distortion parameters; the radial blur needs a post-process pass.
+- **Travel screen effect.** The game uses a radial blur with a dark tunnel vignette. The demo now uses an embedded fullscreen lens pass driven by
+  Blink's blur and distortion parameters: 12-tap weighted radial blur, peripheral lens warp, subtle chromatic
+  separation and a tunnel vignette. It runs on the world camera, before the separate arms camera and UI,
+  and bypasses the pass when inactive. HDR bloom adds a soft halo to the targeting particles. This is an
+  original approximation of the look, not the game's post-process material.
 
 ## 6d. First-person arms, sword and animation (2026-10-07)
 
@@ -452,8 +455,8 @@ format. Formats seen: DXT1, DXT5, ARGB8 and G8. `Textures.tfc` is 1.2 GB, so mip
 - **Blink travel streaks.** `Twk_Blink.m_pCooldownEffect` is a camera-lens effect whose system is
   `vrosier_TestFX2.Blink2.Blink_PlayerWind_01`: 12 velocity-aligned glow streaks and 5 soft flashes thrown backwards
   past the camera. That's the white streaking in screenshots of the travel; the radial blur is the post-process
-  (`m_fMoveBlurMaxStrength` 2.5). The demo uses camera motion blur scaled by Blink's blur parameter, which streaks
-  radially because the camera moves straight ahead.
+  (`m_fMoveBlurMaxStrength` 2.5). The demo's dedicated radial gather uses Blink's blur parameter, with a sharp
+  centre and progressively longer streaks toward the edges (see §6c).
 - **Layering in the demo.** A base layer (`Sword_Ready_*`, `Sword_Sneak_*`, `Sword_Slide*`, `Empty_Swim*`, mantle and
   landing) and a left-arm layer (`Powers_Idle/Walk/Sprint/Jump`, `Powers_Cast_Blink_In/Loop/Out`,
   `Generic_Powers_Cast_Blink_Travel`) masked to the joints `Powers_Idle` animates, crossfaded over 0.18 s. Skinning is
@@ -475,7 +478,7 @@ Next:
 2. Agility: `StatePlayerMasterJump` style variants and the `Attribute_*_PowerJump*` modifiers in `DefaultPlayer.ini`.
 3. Drive camera bob and mantle camera motion from the game's camera animations (the Edge decoder now exists).
 4. Static-mesh import for mesh particle emitters (Blink swirls, slide debris); SubUV flipbooks; Blink's screen
-   post-process material (`BlinkDistancePercentage` and the other parameters) instead of the demo's tint.
+   post-process material (`BlinkDistancePercentage` and the other parameters) instead of the approximate lens shader.
 5. A host adapter example: dropping `dis_motion` into another Rust game, in the mashup style.
 
 ## 8. Credits

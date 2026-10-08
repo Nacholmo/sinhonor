@@ -3,13 +3,14 @@
 //!
 //! cargo run --release -p sinhonor_demo -- [--game <Dishonored dir>] [--difficulty easy|normal|hard|veryhard]
 
+mod blink_post;
 mod fx;
 mod hands;
 mod level;
 
 use bevy::audio::{AudioPlayer, AudioSource, PlaybackSettings, Volume};
 use bevy::input::mouse::AccumulatedMouseMotion;
-use bevy::core_pipeline::motion_blur::MotionBlur;
+use bevy::core_pipeline::bloom::Bloom;
 use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
@@ -189,9 +190,6 @@ fn autopilot_script() -> Vec<Step> {
 struct Hud;
 
 #[derive(Component)]
-struct BlinkOverlay;
-
-#[derive(Component)]
 struct PlayerCam;
 
 fn main() {
@@ -309,6 +307,7 @@ fn main() {
             }),
             ..default()
         }))
+        .add_plugins(blink_post::BlinkPostPlugin)
         .insert_resource(sim)
         .insert_resource(autopilot)
         .insert_resource(sfx)
@@ -318,7 +317,7 @@ fn main() {
         .insert_resource(SurfacesRes(surfaces))
         .insert_resource(ClearColor(HORIZON))
         .insert_resource(AmbientLight { color: Color::srgb(0.75, 0.8, 0.9), brightness: 600.0, ..default() })
-        .add_systems(Startup, (setup_scene, load_audio, hands::setup_hands, grab_cursor.run_if(|a: Res<Autopilot>| a.steps.is_empty())))
+        .add_systems(Startup, (setup_scene, load_audio, hands::setup_hands, grab_cursor.run_if(|a: Res<Autopilot>| a.steps.is_empty())).chain())
         .add_systems(Update, (cursor_toggle, gather_look, simulate, play_sounds, fx_triggers, update_camera, hands::update_hands, fx::update_fx, draw_blink, update_hud).chain())
         .run();
 }
@@ -335,22 +334,6 @@ fn color_for(kind: Kind) -> Color {
         Kind::Water => Color::srgba(0.15, 0.32, 0.45, 0.55),
         Kind::Gravel => Color::srgb(0.24, 0.21, 0.17),
     }
-}
-
-/// Radial vignette: transparent centre, dark edges.
-fn vignette_image() -> Image {
-    use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
-    let n = 256u32;
-    let mut px = Vec::with_capacity((n * n * 4) as usize);
-    for y in 0..n {
-        for x in 0..n {
-            let (u, v) = (x as f32 / (n - 1) as f32 * 2.0 - 1.0, y as f32 / (n - 1) as f32 * 2.0 - 1.0);
-            let d = (u * u * 0.8 + v * v).sqrt();
-            let a = ((d - 0.45) / 0.75).clamp(0.0, 1.0).powf(1.6);
-            px.extend_from_slice(&[0, 0, 0, (a * 255.0) as u8]);
-        }
-    }
-    Image::new(Extent3d { width: n, height: n, depth_or_array_layers: 1 }, TextureDimension::D2, px, TextureFormat::Rgba8UnormSrgb, bevy::asset::RenderAssetUsages::default())
 }
 
 /// The game texture a piece is dressed with, its tint and its tile size in metres.
@@ -447,8 +430,10 @@ fn box_mesh(min: Vec3, max: Vec3, tile: f32) -> Mesh {
 pub fn color_grading() -> bevy::render::view::ColorGrading {
     use bevy::render::view::{ColorGrading, ColorGradingGlobal, ColorGradingSection};
     ColorGrading {
-        global: ColorGradingGlobal { exposure: -0.1, temperature: -0.12, post_saturation: 0.72, ..default() },
-        shadows: ColorGradingSection { saturation: 0.8, contrast: 1.08, lift: 0.01, ..default() },
+        // Grade the combined HDR image gently: contrast above one clips dim linear-light
+        // values, erasing shadow detail in the arms and around the targeting glow.
+        global: ColorGradingGlobal { exposure: -0.1, post_saturation: 0.72, ..default() },
+        shadows: ColorGradingSection { saturation: 0.8, lift: 0.01, ..default() },
         midtones: ColorGradingSection { saturation: 0.85, ..default() },
         highlights: ColorGradingSection { saturation: 0.8, gain: 1.05, ..default() },
     }
@@ -510,18 +495,15 @@ fn setup_scene(
     ));
     commands.spawn((
         Camera3d::default(),
+        Camera { hdr: true, ..default() },
+        bevy::core_pipeline::tonemapping::Tonemapping::ReinhardLuminance,
+        Bloom { intensity: 0.08, low_frequency_boost: 0.25, ..Bloom::OLD_SCHOOL },
+        blink_post::BlinkLens::default(),
         Projection::from(PerspectiveProjection { fov: sim.tuning.fov_deg.to_radians(), near: 0.05, ..default() }),
         DistanceFog { color: HORIZON, falloff: FogFalloff::Linear { start: 15.0, end: 110.0 }, ..default() },
         color_grading(),
-        MotionBlur { shutter_angle: 0.0, samples: 8, ..default() },
         Transform::default(),
         PlayerCam,
-    ));
-    // Blink travel vignette: dark, soft-edged frame whose strength follows Blink's blur.
-    commands.spawn((
-        Node { position_type: PositionType::Absolute, left: Val::Px(0.0), right: Val::Px(0.0), top: Val::Px(0.0), bottom: Val::Px(0.0), ..default() },
-        ImageNode { image: images.add(vignette_image()), color: Color::NONE, ..default() },
-        BlinkOverlay,
     ));
     commands.spawn((
         Text::new(""),
@@ -1002,10 +984,9 @@ fn update_camera(
     time: Res<Time>,
     sim: Res<Sim>,
     st: Res<FxState>,
-    mut cams: Query<(&mut Transform, &mut Projection, &mut MotionBlur), With<PlayerCam>>,
-    mut overlay: Query<&mut ImageNode, With<BlinkOverlay>>,
+    mut cams: Query<(&mut Transform, &mut Projection, &mut blink_post::BlinkLens), With<PlayerCam>>,
 ) {
-    let Ok((mut tf, mut proj, mut blur)) = cams.single_mut() else { return };
+    let Ok((mut tf, mut proj, mut lens)) = cams.single_mut() else { return };
     let m = &sim.motion;
     let dir = m.view_dir();
     let eye = to_bevy(m.camera.eye);
@@ -1021,13 +1002,12 @@ fn update_camera(
     if let Projection::Perspective(p) = &mut *proj {
         p.fov = vertical_fov(m.camera.fov_deg, p.aspect_ratio);
     }
-    if let Ok(mut img) = overlay.single_mut() {
-        let fx = m.blink.fx;
-        let a = (fx.blur * 1.8 + fx.distortion * 0.3).clamp(0.0, 1.0);
-        img.color = Color::srgba(1.0, 1.0, 1.0, a);
-        // Travel blur: camera motion blur only while Blink's blur is up. Moving forward at Blink
-        // speed, the motion vectors fan out from the centre, giving the game's radial streaking.
-        blur.shutter_angle = (fx.blur * 2.0).clamp(0.0, 1.0);
+    let fx = m.blink.fx;
+    lens.blur = fx.blur.max(0.0);
+    lens.distortion = fx.distortion.max(0.0);
+    lens.time = fx.time_elapsed;
+    if let Projection::Perspective(p) = &*proj {
+        lens.aspect = p.aspect_ratio;
     }
 }
 
