@@ -57,7 +57,7 @@ pub fn load_effects(install: &Path) -> Effects {
     {
         out.lens_distance = d;
     }
-    let loader = MaterialLoader::new(Some(dir.clone())).with_engine_defaults(engine);
+    let loader = MaterialLoader::new(Some(dir.clone())).with_engine_defaults(engine).with_package(&game).with_package(&startup);
 
     // Paths the Blink tweak references.
     let mut blink_paths: Vec<(Fx, String)> = Vec::new();

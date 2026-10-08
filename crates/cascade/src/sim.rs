@@ -1,7 +1,7 @@
 //! CPU simulation of a [`SystemDef`].
 
 use crate::{EmitterDef, SystemDef};
-use glam::{Affine3A, Vec2, Vec3};
+use glam::{Affine3A, Quat, Vec2, Vec3};
 use std::f32::consts::TAU;
 use std::sync::Arc;
 
@@ -16,6 +16,8 @@ struct Particle {
     size0: Vec3,
     rot: f32,
     rot_rate: f32,
+    mesh_rot: Vec3,
+    mesh_rot_rate: Vec3,
     color0: Vec3,
     alpha0: f32,
     r: [f32; 8],
@@ -37,6 +39,8 @@ pub struct RenderParticle {
     pub emitter: usize,
     pub pos: Vec3,
     pub size: Vec2,
+    pub mesh_size: Vec3,
+    pub mesh_rotation: Quat,
     /// Sprite roll in radians.
     pub rotation: f32,
     pub color: [f32; 4],
@@ -147,6 +151,7 @@ impl Instance {
                 p.pos += vel * dt;
                 let rate_mult = e.rotation_rate_mult_life.as_ref().map_or(1.0, |d| d.float(t, p.r[3]));
                 p.rot += p.rot_rate * rate_mult * dt;
+                p.mesh_rot += p.mesh_rot_rate * rate_mult * dt;
                 true
             });
         }
@@ -237,6 +242,8 @@ impl Instance {
             age: 0.0,
             life,
             size0,
+            mesh_rot: e.mesh_rotation.as_ref().map_or(Vec3::ZERO, |d| d.vector(t, rv(3)) * TAU),
+            mesh_rot_rate: e.mesh_rotation_rate.as_ref().map_or(Vec3::ZERO, |d| d.vector(t, rv(4)) * TAU),
             rot: e.start_rotation.float(t, r[3]) * TAU,
             rot_rate: e.rotation_rate.float(t, r[4]) * TAU,
             color0: e.start_color.as_ref().map_or(Vec3::ONE, |d| d.vector(t, rv(5))),
@@ -271,7 +278,10 @@ impl Instance {
                 } else {
                     (p.pos, p.vel)
                 };
-                RenderParticle { emitter: k, pos, size: Vec2::new(size.x, size.y), rotation: p.rot, color: [color.x, color.y, color.z, alpha], velocity }
+                // Cascade mesh rotation vectors are roll, pitch, yaw in turns.
+                let rotation = Quat::from_rotation_z(p.mesh_rot.z) * Quat::from_rotation_y(-p.mesh_rot.y) * Quat::from_rotation_x(p.mesh_rot.x);
+                let rotation = if e.local_space { Quat::from_mat3a(&self.transform.matrix3) * rotation } else { rotation };
+                RenderParticle { mesh_size: size, mesh_rotation: rotation * e.mesh_pre_rotation, emitter: k, pos, size: Vec2::new(size.x, size.y), rotation: p.rot, color: [color.x, color.y, color.z, alpha], velocity }
             })
         })
     }

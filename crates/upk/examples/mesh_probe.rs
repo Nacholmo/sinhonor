@@ -4,6 +4,7 @@ fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
     let pkg = Package::open(&a[0]).unwrap();
     let i = pkg.find_export(&a[1]).expect("mesh");
+    match pkg.static_mesh(i) { Ok(m) => println!("LOD0: {} vertices, {} triangles", m.vertices.len(), m.indices.len()/3), Err(e) => println!("LOD0: {e}") };
     let (props, tail) = pkg.properties_and_tail(i).unwrap();
     for p in &props { println!("  {} = {:?}", p.name, p.value); }
     let d = pkg.export_data(i);

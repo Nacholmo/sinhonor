@@ -162,8 +162,13 @@ pub struct EmitterDef {
     pub start_rotation: Dist,
     pub rotation_rate: Dist,
     pub rotation_rate_mult_life: Option<Dist>,
-    /// Mesh emitters are drawn as sprites (no mesh import yet).
+    /// PSA_Square uses X size for both billboard dimensions, including axis-locked cards.
+    pub square: bool,
     pub is_mesh: bool,
+    pub mesh: Option<Arc<upk::staticmesh::StaticMesh>>,
+    pub mesh_pre_rotation: glam::Quat,
+    pub mesh_rotation: Option<Dist>,
+    pub mesh_rotation_rate: Option<Dist>,
 }
 
 #[derive(Clone, Debug, Default)]

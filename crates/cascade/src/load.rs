@@ -12,21 +12,28 @@ const MAX_TEXTURE: u32 = 256;
 /// Builds sprite materials from material instances, caching by object path.
 /// Also supplies module class defaults: UE3 only serializes values that differ from the class
 /// default object, so omitted distributions come from `Engine.upk`'s `Default__ParticleModule*`.
-pub struct MaterialLoader {
+pub struct MaterialLoader<'a> {
+    packages: Vec<&'a Package>,
     tfc_dir: Option<PathBuf>,
     cache: Mutex<HashMap<String, Arc<SpriteMaterial>>>,
     engine: Option<Package>,
     class_defaults: Mutex<HashMap<String, Vec<Property>>>,
 }
 
-impl MaterialLoader {
+impl<'a> MaterialLoader<'a> {
     pub fn new(tfc_dir: Option<PathBuf>) -> Self {
-        Self { tfc_dir, cache: Mutex::new(HashMap::new()), engine: None, class_defaults: Mutex::new(HashMap::new()) }
+        Self { packages: Vec::new(), tfc_dir, cache: Mutex::new(HashMap::new()), engine: None, class_defaults: Mutex::new(HashMap::new()) }
     }
 
     /// Uses `engine` (the install's `Engine.upk`) for module class defaults.
     pub fn with_engine_defaults(mut self, engine: Package) -> Self {
         self.engine = Some(engine);
+        self
+    }
+
+    /// Packages that may own imported materials and textures (cooked imports keep object paths).
+    pub fn with_package(mut self, package: &'a Package) -> Self {
+        self.packages.push(package);
         self
     }
 
@@ -47,6 +54,15 @@ impl MaterialLoader {
         let path = pkg.object_path(r);
         if let Some(m) = self.cache.lock().unwrap().get(&path) {
             return Some(m.clone());
+        }
+        if !matches!(r, ObjRef::Export(_)) {
+            for source in &self.packages {
+                if let Some(i) = source.find_export(&path) {
+                    return self.get(source, ObjRef::Export(i));
+                }
+            }
+            // Do not cache a fake material under the real asset's name.
+            return None;
         }
         let m = Arc::new(self.build(pkg, r, &path));
         self.cache.lock().unwrap().insert(path, m.clone());
@@ -114,19 +130,19 @@ impl MaterialLoader {
         if let Some(o) = scalars.get("opacity") {
             tint[3] = *o;
         }
-        // Glow materials shape a radial glow; the glow power sharpens it and the fog intensity
-        // scales its brightness (25 on the Blink glow, 1 on its vertical light).
+        // Compact glow profile; contact fading is applied by the renderer.
         let glow_power = scalars.get("g_glowpower").copied().unwrap_or(1.5).max(0.5);
         if glow {
             tint[3] *= scalars.get("f_fog_intensity").copied().unwrap_or(1.0).max(0.0);
         }
-
         let tex = |keys: &[&str]| -> Option<upk::texture::Rgba> {
             keys.iter().find_map(|k| {
                 let (_, r) = textures.iter().find(|(n, _)| n.contains(k))?;
                 match r {
                     ObjRef::Export(e) => pkg.texture_rgba(*e, MAX_TEXTURE, self.tfc_dir.as_deref()).ok(),
-                    _ => None,
+                    _ => self.packages.iter().find_map(|source| {
+                        source.find_export(&pkg.object_path(*r)).and_then(|e| source.texture_rgba(e, MAX_TEXTURE, self.tfc_dir.as_deref()).ok())
+                    }),
                 }
             })
         };
@@ -142,7 +158,7 @@ impl MaterialLoader {
                 }
             }
         }
-        let size = 64u32;
+        let size = 256u32;
         let (w, h) = diffuse.as_ref().or(opacity.as_ref()).map_or((size, size), |t| (t.width, t.height));
         let mut rgba = vec![0u8; (w * h * 4) as usize];
         for y in 0..h {
@@ -151,7 +167,7 @@ impl MaterialLoader {
                 let (u, v) = ((x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32);
                 let d = ((u - 0.5).powi(2) + (v - 0.5).powi(2)).sqrt() * 2.0;
                 let radial = (1.0 - d).clamp(0.0, 1.0).powf(1.5);
-                let glow_shape = (1.0 - d).clamp(0.0, 1.0).powf(glow_power);
+                let glow_shape = (-4.0 * glow_power * d * d).exp() * (1.0 - d).clamp(0.0, 1.0);
                 let sample = |t: &upk::texture::Rgba| {
                     let (tx, ty) = ((u * t.width as f32) as u32 % t.width, (v * t.height as f32) as u32 % t.height);
                     let i = ((ty * t.width + tx) * 4) as usize;
@@ -317,6 +333,7 @@ fn build_emitter(pkg: &Package, em: ObjRef, lod: usize, materials: &MaterialLoad
                 def.duration = lookup(&mp, "EmitterDuration").and_then(Value::as_f32).unwrap_or(1.0);
                 def.loops = lookup(&mp, "EmitterLoops").and_then(Value::as_f32).unwrap_or(0.0) as u32;
                 def.delay = lookup(&mp, "EmitterDelay").and_then(Value::as_f32).unwrap_or(0.0);
+                def.square = !matches!(lookup(&mp, "ScreenAlignment"), Some(Value::Enum(a)) if a != "PSA_Square");
                 if let Some(Value::Enum(a)) = lookup(&mp, "ScreenAlignment") {
                     if a == "PSA_Velocity" {
                         def.alignment = Some(Alignment::Velocity);
@@ -378,7 +395,19 @@ fn build_emitter(pkg: &Package, em: ObjRef, lod: usize, materials: &MaterialLoad
                     }
                 }
             }
-            "ParticleModuleTypeDataMesh" => def.is_mesh = true,
+            "ParticleModuleTypeDataMesh" => {
+                def.is_mesh = true;
+                if let Some(Value::Object(i)) = lookup(&mp, "Mesh") {
+                    if let ObjRef::Export(e) = ObjRef::from_index(*i) {
+                        def.mesh = pkg.static_mesh(e).ok().map(Arc::new);
+                    }
+                }
+                let angle = |n| lookup(&mp, n).and_then(Value::as_f32).unwrap_or(0.0).to_radians();
+                def.mesh_pre_rotation = glam::Quat::from_rotation_z(angle("Yaw"))
+                    * glam::Quat::from_rotation_y(-angle("Pitch")) * glam::Quat::from_rotation_x(angle("Roll"));
+            }
+            "ParticleModuleMeshRotation" => def.mesh_rotation = dist(&mp, "StartRotation", 3),
+            "ParticleModuleMeshRotationRate" => def.mesh_rotation_rate = dist(&mp, "StartRotationRate", 3),
             _ => {}
         }
     }
