@@ -60,6 +60,8 @@ fn tuning() -> MotionTuning {
         slide_time: 1.0,
         slide_not_cancelable_pct: 0.5,
         slide_allow_return_to_sprint: false,
+        slide_deactivate_angle_deg: 25.0,
+        slide_impact_shake: 1.0,
         auto_crouch_test_distance: 100.0,
         min_pitch_deg: -85.0,
         max_pitch_deg: 85.0,
@@ -67,7 +69,23 @@ fn tuning() -> MotionTuning {
         fov_blend_speed: 5.0,
         bob_amount: 0.5,
         roll_amount: 0.5,
-        lean: LeanTuning { max_angle_deg: 15.0, max_angle_crouched_deg: 15.0, camera_tilt_pct: 0.5, height_pct: 1.0, springiness: 80.0, damping: 12.0 },
+        lean: LeanTuning {
+            lean_speed: 800.0,
+            release_time: 0.2,
+            min_pitch_deg: -30.0,
+            max_pitch_deg: 30.0,
+            min_yaw_deg: -50.0,
+            max_yaw_deg: 50.0,
+            max_angle_deg: 15.0,
+            max_angle_crouched_deg: 15.0,
+            max_soften_angle_deg: 4.0,
+            max_soften_speed: 4.0,
+            camera_tilt_pct: 0.5,
+            height_pct: 1.5,
+            springiness: 80.0,
+            damping: 12.0,
+            fixed_time_step: 1.0 / 60.0,
+        },
         swim: SwimTuning { min_accel: 500.0, max_accel: 2000.0, max_speed_no_stroke: 300.0, stroke_time: 0.3 },
         mantle_blink: mantle.clone(),
         mantle,
@@ -774,4 +792,68 @@ fn falling_fast_catches_edges_only_once_well_past_them() {
     assert!(!impact && slow < 70.0, "slow: edge {slow} above the feet");
     let (fast, impact) = fall(1200.0).expect("caught falling fast");
     assert!(impact && fast >= 140.0, "fast: edge {fast} above the feet");
+}
+
+/// Sprints along +X in `w`, then starts a slide; returns the motion mid-slide.
+fn sliding(w: &BoxWorld, yaw: f32) -> Motion {
+    let mut m = Motion::new(tuning(), Vec3::ZERO, yaw);
+    run(&mut m, w, Input { sprint: true, ..fwd() }, 1.0);
+    run(&mut m, w, Input { sprint: true, crouch: true, ..fwd() }, 1.0 / 60.0);
+    assert_eq!(m.state, MotionState::Sliding);
+    m
+}
+
+#[test]
+fn slide_eases_to_crouch_speed_and_cancels_only_after_its_start() {
+    let w = floor_world();
+    let mut m = sliding(&w, 0.0);
+    let start = m.speed_2d();
+    // A quarter of the way in, the cosine ease has barely begun.
+    run(&mut m, &w, fwd(), 0.25);
+    let eased = 1.0 - (1.0 - (0.25f32 * std::f32::consts::PI).cos()) * 0.5;
+    let expected = 200.0 + (start - 200.0) * eased;
+    assert!((m.speed_2d() - expected).abs() < 15.0, "speed {} vs {expected}", m.speed_2d());
+    // Pulling back does nothing in the first half...
+    run(&mut m, &w, Input { move_axis: Vec2::new(0.0, -1.0), ..Default::default() }, 1.0 / 60.0);
+    assert_eq!(m.state, MotionState::Sliding);
+    // ...and ends the slide after it.
+    run(&mut m, &w, fwd(), 0.4);
+    run(&mut m, &w, Input { move_axis: Vec2::new(0.0, -1.0), ..Default::default() }, 1.0 / 60.0);
+    assert_eq!(m.state, MotionState::Walking);
+}
+
+#[test]
+fn slide_stops_dead_when_turned_aside() {
+    // Sliding diagonally into a wall: it turns the slide 45 degrees, past the 25 allowed.
+    let mut w = floor_world();
+    w.add_box(Vec3::new(560.0, -2000.0, 0.0), Vec3::new(900.0, 2000.0, 200.0));
+    let mut m = sliding(&w, std::f32::consts::FRAC_PI_4);
+    let impact = (0..60).find_map(|_| m.update(&w, &fwd(), 1.0 / 60.0).slide_impact);
+    assert_eq!(impact, Some(1.0), "impact reported");
+    assert_eq!(m.state, MotionState::Walking);
+    // (The rest of that frame is ordinary walking again.)
+    assert!(m.speed_2d() < 40.0, "stopped dead, speed {}", m.speed_2d());
+}
+
+#[test]
+fn lean_swings_the_head_out_on_its_lever_and_holds_the_view() {
+    let w = floor_world();
+    let mut m = Motion::new(tuning(), Vec3::ZERO, 0.0);
+    run(&mut m, &w, Input::default(), 0.5);
+    let rest = m.camera.eye;
+    let lean = Input { lean: 1.0, ..Default::default() };
+    run(&mut m, &w, lean, 1.0);
+    // Lever 1.5 x 2 half-heights; out to the angle limit, plus at most the soften angle.
+    let lever = 1.5 * 80.0 * 2.0;
+    let side = m.camera.eye.y - rest.y;
+    let (lo, hi) = (lever * 15f32.to_radians().sin(), lever * 19f32.to_radians().sin());
+    assert!(side > lo - 2.0 && side < hi + 2.0, "leaned {side}, expected {lo}..{hi}");
+    assert!(m.camera.eye.z < rest.z, "the head drops as it swings out");
+    assert!(m.camera.roll > 0.0);
+    // The view can't be turned far while leaning.
+    run(&mut m, &w, Input { look: Vec2::new(2.0, 0.0), ..lean }, 1.0 / 60.0);
+    assert!((m.yaw - 50f32.to_radians()).abs() < 1e-3, "yaw held at {}", m.yaw);
+    // Let go: the spring brings the head home.
+    run(&mut m, &w, Input::default(), 1.5);
+    assert!((m.camera.eye.y - rest.y).abs() < 1.0, "back to {}", m.camera.eye.y - rest.y);
 }

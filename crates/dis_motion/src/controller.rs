@@ -15,6 +15,8 @@ const MAX_SUBSTEP: f32 = 1.0 / 90.0;
 const FLOOR_SNAP: f32 = 4.0;
 /// How long jump must have been held, at the top of a jump, for the fixed power jump (game constant).
 pub const POWER_JUMP_MIN_HOLD: f32 = 0.05;
+/// Pulling back further than this cancels a slide (game constant).
+const SLIDE_CANCEL_BACK: f32 = -0.8;
 /// How long the turn and slide to a mantle's start take (the game's default animation blend).
 const MANTLE_INTRO_TIME: f32 = 0.2;
 /// Upward speed at or below which a jump has reached its top (game constant).
@@ -72,6 +74,8 @@ pub struct StepEvents {
     /// The mantle caught an edge while falling fast (the game plays an impact animation).
     pub mantle_impact: bool,
     pub slid: bool,
+    /// The slide was stopped dead by something in its way: the camera shake's strength.
+    pub slide_impact: Option<f32>,
     pub blink: Vec<BlinkEvent>,
     /// Locked on to a drop-assassination target that is still too far below, and diving.
     pub dove_at: Option<u32>,
@@ -140,8 +144,11 @@ struct MantleRun {
 #[derive(Clone, Copy, Debug, Default)]
 struct SlideRun {
     t: f32,
-    dir: Vec3,
-    speed0: f32,
+    /// Velocity at the start, and the crouch-speed velocity it eases to.
+    start: Vec3,
+    target: Vec3,
+    /// Something slowed the slide below its target: the easing stops.
+    free: bool,
 }
 
 pub struct Motion {
@@ -161,6 +168,9 @@ pub struct Motion {
     pub takedown: Takedown,
     pub melee: Melee,
     pub jump: Option<JumpRun>,
+    /// Time left in the lean, and the view it started from (yaw, pitch).
+    lean_hold: f32,
+    lean_from: (f32, f32),
     crouch_wanted: bool,
     auto_crouched: bool,
     prev: Input,
@@ -189,6 +199,8 @@ impl Motion {
             takedown: Takedown::default(),
             melee: Melee::default(),
             jump: None,
+            lean_hold: 0.0,
+            lean_from: (0.0, 0.0),
             crouch_wanted: false,
             auto_crouched: false,
             prev: Input::default(),
@@ -241,6 +253,22 @@ impl Motion {
             self.yaw = (self.yaw + input.look.x).rem_euclid(std::f32::consts::TAU);
             self.pitch = (self.pitch + input.look.y).clamp(t.min_pitch_deg.to_radians(), t.max_pitch_deg.to_radians());
         }
+        // Leaning (and for a moment after) keeps the view near where the lean started.
+        if self.state == MotionState::Walking && self.speed_2d() < 50.0 && input.lean != 0.0 {
+            if self.lean_hold <= 0.0 {
+                self.lean_from = (self.yaw, self.pitch);
+            }
+            self.lean_hold = t.lean.release_time;
+        } else {
+            self.lean_hold = (self.lean_hold - dt).max(0.0);
+        }
+        if self.lean_hold > 0.0 {
+            let l = &t.lean;
+            let (yaw0, pitch0) = self.lean_from;
+            let turned = (self.yaw - yaw0 + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+            self.yaw = (yaw0 + turned.clamp(l.min_yaw_deg.to_radians(), l.max_yaw_deg.to_radians())).rem_euclid(std::f32::consts::TAU);
+            self.pitch = self.pitch.clamp(pitch0 + l.min_pitch_deg.to_radians(), pitch0 + l.max_pitch_deg.to_radians());
+        }
 
         let steps = (dt / MAX_SUBSTEP).ceil().clamp(1.0, 8.0) as usize;
         let h = dt / steps as f32;
@@ -270,6 +298,7 @@ impl Motion {
             pos: self.pos,
             target_eye_height: self.eye_height_for(self.crouched),
             yaw: self.yaw,
+            pitch: self.pitch,
             speed_2d: self.speed_2d(),
             run_speed: self.tuning.run_speed,
             grounded: matches!(self.state, MotionState::Walking | MotionState::Sliding | MotionState::Takedown),
@@ -698,8 +727,8 @@ impl Motion {
     // ----------------------------------------------------------------- slide
 
     fn start_slide(&mut self, world: &dyn World) {
-        let dir = self.vel.truncate().normalize_or_zero().extend(0.0);
-        self.slide = SlideRun { t: 0.0, dir, speed0: self.speed_2d() };
+        let start = self.vel.with_z(0.0);
+        self.slide = SlideRun { t: 0.0, start, target: start.normalize_or_zero() * self.tuning.crouch_speed, free: false };
         self.set_crouched(world, true);
         self.crouch_wanted = true;
         self.state = MotionState::Sliding;
@@ -711,11 +740,14 @@ impl Motion {
         }
     }
 
+    /// The slide (`NOTES.md` §5g): velocity eases from where it started to crouch speed along the
+    /// same line over the slide time. It can be cancelled (crouch again, jump, or pull back) only
+    /// after its first part, and stops dead if something turns it aside.
     fn slide_tick(&mut self, world: &dyn World, input: &Input, prev: &Input, dt: f32, ev: &mut StepEvents) {
         let t = self.tuning.clone();
         self.slide.t += dt;
         let frac = (self.slide.t / t.slide_time.max(1e-3)).min(1.0);
-        let cancelable = frac >= t.slide_not_cancelable_pct;
+        let cancelable = frac > t.slide_not_cancelable_pct;
         if cancelable && Self::pressed(input.jump, prev.jump) && self.set_crouched(world, false) {
             self.crouch_wanted = false;
             self.take_off(ev);
@@ -726,11 +758,34 @@ impl Motion {
             self.state = MotionState::Walking;
             return;
         }
-        // Speed bleeds from the entry speed down to crouch speed over the slide.
-        let speed = self.slide.speed0 + (t.crouch_speed - self.slide.speed0) * frac;
-        self.vel = self.slide.dir * speed;
+        if cancelable && input.move_axis.y < SLIDE_CANCEL_BACK {
+            self.state = MotionState::Walking;
+            return;
+        }
+        let run = &self.slide;
+        if run.free {
+            self.calc_velocity(Vec3::ZERO, t.crouch_speed, 1.0, t.ground_friction, dt);
+        } else {
+            let ease = (1.0 - (frac * std::f32::consts::PI).cos()) * 0.5;
+            let v = run.start + (run.target - run.start) * ease;
+            self.vel = Vec3::new(v.x, v.y, self.vel.z);
+        }
         self.ground_move(world, dt);
-        if self.state == MotionState::Sliding && frac >= 1.0 {
+        if self.state != MotionState::Sliding {
+            return;
+        }
+        // Turned aside by more than the deactivate angle: an impact, and the slide stops dead.
+        let (from, now) = (self.slide.start.truncate().normalize_or_zero(), self.vel.truncate().normalize_or_zero());
+        if from.dot(now) < t.slide_deactivate_angle_deg.to_radians().cos() {
+            self.vel = Vec3::ZERO;
+            self.state = MotionState::Walking;
+            ev.slide_impact = Some(t.slide_impact_shake);
+            return;
+        }
+        if self.vel.truncate().length() < self.slide.target.length() {
+            self.slide.free = true;
+        }
+        if frac >= 1.0 {
             self.state = MotionState::Walking;
             self.end_slide(world);
         }

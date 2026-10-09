@@ -51,13 +51,13 @@ Distances are in metres; the game works in Unreal units, where 1 uu = 1 cm.
 - **Fall**: touching down faster than 22.5 m/s reports fall damage (`m_MaxSpeedBeforeFallingDamage`; there's no health, so the HUD logs it). The landing dip and the camera shake scale with how hard you hit.
 - **Crouch**: the collision shrinks from 1.75 m tall to 58 cm (`DishonoredPawn`'s cylinder and `CrouchHeight`), keeping your feet in place. Standing up only happens if there's room.
 - **Auto-crouch**: walk at a gap only a crouched Corvo fits through and he crouches by himself, then stands once the way ahead is clear (`m_fAutoCrouchTestDistance` 1 m, `m_fAutoCrouchMinCrawlDepth`).
-- **Slide**: crouch while sprinting. Your speed bleeds from where you started down to sneak speed over the game's 1.1 s (`m_fSlideTime`). The first half can't be cancelled (`m_fSlidePercentNotCancelable` 0.5); after that, crouch stands you up and jump jumps out of it.
+- **Slide**: crouch while sprinting. Your velocity eases from where you started down to sneak speed over the game's 1.1 s (`m_fSlideTime`), gently at both ends. The first half can't be cancelled (`m_fSlidePercentNotCancelable` 0.5); after that, crouch stands you up, jump jumps out of it and pulling back stops it. Slide into something that turns you more than 25° (`m_fSlideVelocityDeactivateAngle`) and you stop dead with a camera shake.
 - **Mantle**: jump at a ledge, or hold forward or jump while falling past one. The ledge finder is the game's own (`NOTES.md` §5f), with the heights from `m_pMantleTweaks`:
   - it first measures the room above you, then sweeps a box your size forward 50 cm (`m_MantleEdgeSearchDist`) at heights rising 12 cm at a time (`m_LineCheckStepSize`). The first wall it meets must be near-vertical and facing you (within 20° and 45°). From then on the box stays pressed against it and reaches 20 cm in (`m_fMantleForwardMoveAmount`). The first height where that reach is clear is the top of the edge;
   - the top must be no steeper than 45°, and a standing box must fit going over it; otherwise you climb crouched;
   - under 44 cm you just step up (`MaxStepHeight`). Low edges, 55 cm–1.2 m, are a step-up mantle: three quick moves (to the wall, up, 20 cm on) with the view catching up over 0.2 s (`m_fLowMantleStepUpBlendTime`). Medium (1.2–1.7 m) and high (1.7–2.3 m) ones turn you to face the edge and climb along the animation's own root motion, its rise stretched to the edge's height, until the animation's exit (`Empty_MantleMedium`, `…High`, or the crouched ones). Over 2.3 m is too high, so Blink up;
   - falling faster than 10 m/s you can only catch edges at least 1.55 m above your feet (`m_fFallSpeedForLedgeGrab`, `m_fLedgeGrabMantleMinEdgeHeight`), and past 20 m/s none (`m_fMaxFallSpeedForMantle`). After a blink, the Blink finder (`m_pMantleBlinkTweaks`) has no minimum height.
-- **Lean**: Q and E lean up to 15°. The lean is a spring (`DefaultCamera.ini`'s springiness 80 and damping 12) that tilts the camera by half the angle, and it is clamped so your head never goes through a wall.
+- **Lean**: Q and E lean, standing still. As in the game (`NOTES.md` §5g), your head is a point on a lever around a pivot two body heights below it (`m_fLeanHeightPct`): the lean pushes it out at 10 m/s (`m_fLeanSpeed`), it swings out and drops a little until the lever is 15° over (`m_fMaxLeanAngle`, giving up to 5° more if you keep pushing), and a spring (springiness 80, damping 12) brings it back. The camera tilts by half the angle, the view can turn only 60° and pitch 35° from where the lean started, and the head never goes through a wall.
 - **Swim**: walk into deep water and you swim at up to 6 m/s (`m_WaterSpeed`). Like the game, you move in strokes: strong acceleration for 0.3 s, then a weaker glide (`DefaultPlayerState.ini`'s swim block). Buoyancy holds your eyes at the surface. Swim at a ledge and jump to climb out.
 - **Ladder**: walk into one to grab on. You climb at 2.54 m/s (`LadderSpeed`) toward where you look, and step off onto the landing at the top.
 - **Camera**: head bob and roll scale with speed (the bob and roll amounts from `DefaultCamera.ini`), landings dip the view on a spring, and the FOV is the game's 75°.
@@ -146,7 +146,7 @@ The movement needs only the tuning. Everything else is optional and skipped with
 
 **What's still approximate:**
 
-- **Not yet exact**: walking uses UE3's standard `CalcVelocity` model, not Dishonored's own "LocoNew" walking path. The slide and the lean are modelled from the tweak values and animation lengths.
+- **Not yet exact**: walking uses UE3's standard `CalcVelocity` model, not Dishonored's own "LocoNew" walking path, and the lean's wall collision is the kit's own.
 - **Camera**: the head bob is procedural. The game drives it from a camera animation (`Ply_Nav_LocoCamera_at`), which the Edge decoder can now read but nothing plays yet.
 - **Effects**: SubUV flipbooks and the original materials' scrolling/distortion graphs aren't done. Mesh particles use cooked LOD 0 geometry, UVs, vertex colours and rotation curves. The particle materials, tattoo brightness and Blink lens shader approximate the look; they do not reconstruct the original shaders. The world camera uses HDR bloom.
 - **Smoke**: the hand smoke is simulated relative to the camera, so it doesn't trail behind you as it does in the game.
@@ -210,7 +210,8 @@ cargo test --workspace
 - the jump apex against ballistics;
 - Agility's power jump: only when jump is held to the top, once, and not without the power; and the other two jump styles;
 - stepping up small ledges and mantling tall ones; the edge finder's step-up for low edges and animation-driven climb (facing the edge) for high ones, refusing walls at a glancing angle, crouching under a low roof, and catching edges only well past them when falling fast;
-- the slide bleeding to crouch speed;
+- the slide easing to crouch speed, cancelling only after its first part, and stopping dead when a wall turns it;
+- the lean swinging the head out on its lever to the angle limit, holding the view, and springing back;
 - auto-crouching under a low gap;
 - Blink reaching a wall and keeping momentum, staying on the floor when cast crouched, and its squashed-sphere range;
 - swimming at the surface and climbing a ladder;
@@ -228,7 +229,7 @@ All the tuning is read at runtime by `crates/dis_data`, and `cargo run --release
 - **Pawn defaults** (`DishonoredGame.upk`, `Engine.upk`): collision size, crouch size, step height, eye height, ladder speed, walkable floor angle and friction, from the class default objects.
 - **INI files**: gravity, lean springs, swim strokes, FOV, bob and roll, the jump style, and the powers' upgrade levels with their attribute modifiers.
 - **Animations** (`Startup.upk`): slides and landings last as long as the animations that play them, and mantles follow their animation's root motion until its exit notify.
-- **Behaviour**: Blink's targeting, travel, end and screen effect, and the jump, follow the behaviour specified in `NOTES.md` §5; the drop assassination follows §5b, the sword §5c, the ground assassination §5d, Agility §5e and the mantle §5f. No game code, decompiled or otherwise, is in this repository.
+- **Behaviour**: Blink's targeting, travel, end and screen effect, and the jump, follow the behaviour specified in `NOTES.md` §5; the drop assassination follows §5b, the sword §5c, the ground assassination §5d, Agility §5e, the mantle §5f and the slide and lean §5g. No game code, decompiled or otherwise, is in this repository.
 
 ## Layout
 
@@ -261,7 +262,7 @@ The `examples/` of `upk`, `cascade`, `edge_anim`, `wwise` and `dis_data` are the
 
 ## Screenshot mode
 
-`cargo run --release -p sinhonor_demo -- --autopilot shots` plays a scripted route with no mouse needed: a mantle, a blink, the ladder, the rooftop blink, a slide, a close-up of the Blink marker and the arrival lens effect. It prints the motion state at each checkpoint, saves a PNG of each into `shots/`, and quits. Add `--route fx` for the effects route instead: the Blink marker near and far, mid-travel, gravel, puddle, falling into the pool, swimming and climbing out. `--route drop` plays the three drop assassinations: off the balcony, diving from the rooftop, and blinking up beside a guard. `--route sword` chains three swings into a guard, swings at a wall and makes a sneak attack. `--route assassinate` assassinates one guard from behind (slow) and another from the side (fast). `--route agility` holds a jump at the 3.2 m block without Agility and then with it (power jump, then onto the block), and sprints with Agility II. It's handy for checking nothing broke after a change.
+`cargo run --release -p sinhonor_demo -- --autopilot shots` plays a scripted route with no mouse needed: a mantle, a blink, the ladder, the rooftop blink, a slide, a close-up of the Blink marker and the arrival lens effect. It prints the motion state at each checkpoint, saves a PNG of each into `shots/`, and quits. Add `--route fx` for the effects route instead: the Blink marker near and far, mid-travel, gravel, puddle, falling into the pool, swimming and climbing out. `--route drop` plays the three drop assassinations: off the balcony, diving from the rooftop, and blinking up beside a guard. `--route sword` chains three swings into a guard, swings at a wall and makes a sneak attack. `--route assassinate` assassinates one guard from behind (slow) and another from the side (fast). `--route lean` leans out from behind a pillar both ways and slides into a wall. `--route agility` holds a jump at the 3.2 m block without Agility and then with it (power jump, then onto the block), and sprints with Agility II. It's handy for checking nothing broke after a change.
 
 ## Purpose and scope
 

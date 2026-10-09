@@ -20,7 +20,7 @@ use dis_data::surfaces::Surface as TexSurface;
 use dis_motion::{Awareness, BlinkEvent, BlinkMode, Input as MotionInput, MantleKind, MeleeEvent, Motion, MotionState, MotionTuning, Reach, StepEvents, World};
 use glam::Affine3A as Affine3AId;
 use std::collections::HashMap;
-use std::f32::consts::{FRAC_PI_2, PI};
+use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, PI};
 use level::{Kind, Level};
 use std::path::PathBuf;
 
@@ -219,6 +219,23 @@ fn autopilot_fx_script() -> Vec<Step> {
     ]
 }
 
+/// Leaning out from behind a pillar, both ways, and a slide into a wall.
+fn autopilot_lean_script() -> Vec<Step> {
+    let idle = MotionInput::default();
+    vec![
+        Step { teleport: Some([-600.0, 400.0, 0.0]), view: Some((FRAC_PI_2, 0.0)), shot: true, ..step("behind pillar", 0.6, idle) },
+        Step { shot: true, ..step("lean left", 0.8, MotionInput { lean: -1.0, ..idle }) },
+        step("back", 0.8, idle),
+        Step { shot: true, ..step("lean right", 0.8, MotionInput { lean: 1.0, ..idle }) },
+        step("back again", 0.8, idle),
+        Step { teleport: Some([400.0, 300.0, 0.0]), view: Some((FRAC_PI_4, 0.0)), ..step("to the wall", 0.3, idle) },
+        step("sprint", 0.6, MotionInput { sprint: true, move_axis: Vec2::new(0.0, 1.0), ..idle }),
+        step("slide", 0.05, MotionInput { sprint: true, crouch: true, move_axis: Vec2::new(0.0, 1.0), ..idle }),
+        Step { shot: true, ..step("slide into wall", 0.8, MotionInput { move_axis: Vec2::new(0.0, 1.0), ..idle }) },
+        step("flush", 0.5, idle),
+    ]
+}
+
 /// The sword: a three-swing chain that finishes a guard, a swing into a wall, and a sneak attack.
 fn autopilot_sword_script() -> Vec<Step> {
     let idle = MotionInput::default();
@@ -373,6 +390,7 @@ fn main() {
                     Some("sword") => autopilot.steps = autopilot_sword_script(),
                     Some("assassinate") => autopilot.steps = autopilot_assassinate_script(),
                     Some("agility") => autopilot.steps = autopilot_agility_script(),
+                    Some("lean") => autopilot.steps = autopilot_lean_script(),
                     _ => {}
                 }
             }
@@ -899,6 +917,9 @@ fn simulate(
     if ev.slid {
         push_log(&mut sim, "slide".into());
     }
+    if ev.slide_impact.is_some() {
+        push_log(&mut sim, "slide stopped by a wall".into());
+    }
     if let Some(v) = ev.landed.filter(|v| *v > 400.0) {
         push_log(&mut sim, format!("landed at {v:.0} uu/s{}", if ev.fall_damage.is_some() { " (fall damage!)" } else { "" }));
     }
@@ -1215,6 +1236,10 @@ fn fx_triggers(time: Res<Time>, sim: Res<Sim>, mut sfx: ResMut<Sfx>, mut fxw: Re
     // The blade striking the world shakes the view (scaled from the game's shake strength).
     if let Some(MeleeEvent::EnvHit { shake, .. }) = ev.melee.iter().find(|e| matches!(e, MeleeEvent::EnvHit { .. })) {
         st.shake = (0.25, shake / 400.0);
+    }
+    // A slide stopped dead by a wall.
+    if let Some(shake) = ev.slide_impact {
+        st.shake = (0.3, shake * 0.5);
     }
     st.shake.0 = (st.shake.0 - time.delta_secs()).max(0.0);
 }

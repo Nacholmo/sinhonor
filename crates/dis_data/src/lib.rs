@@ -88,6 +88,9 @@ pub struct PlayerTuning {
     pub slide_time: f32,
     pub slide_percent_not_cancelable: f32,
     pub slide_allow_return_to_sprint: bool,
+    /// The slide stops dead if something turns it further than this (degrees).
+    pub slide_velocity_deactivate_angle: f32,
+    pub slide_impact_camera_shake: f32,
     pub auto_crouch_test_distance: f32,
     pub auto_crouch_min_crawl_depth: f32,
 
@@ -122,6 +125,16 @@ pub enum JumpStyle {
 pub struct LeanTuning {
     pub lean_speed: f32,
     pub release_time: f32,
+    /// View limits while leaning, around the view when the lean started (degrees).
+    pub min_pitch: f32,
+    pub max_pitch: f32,
+    pub min_yaw: f32,
+    pub max_yaw: f32,
+    /// How far, and how fast, the angle limit gives when held against it.
+    pub max_soften_angle: f32,
+    pub max_soften_speed: f32,
+    /// The camera's fixed step (`DishonoredCameraInfluence.m_fFixedTimeStep`).
+    pub fixed_time_step: f32,
     pub max_angle: f32,
     pub max_angle_crouched: f32,
     pub camera_tilt_percent: f32,
@@ -422,7 +435,8 @@ pub fn load(install: &Path, difficulty: Difficulty) -> Result<GameData, Error> {
     let attr_field = format!("m_pAttributeTweaks[{}]", difficulty.index());
     let attrs = deref(&startup, &top, &attr_field).ok_or_else(|| Error::Missing(attr_field.clone()))?;
     let game = open(install, "DishonoredGame.upk")?;
-    // Attributes Corvo's tweak leaves out keep the class defaults.
+    // Fields Corvo's tweaks leave out keep the class defaults.
+    let top = merged(&props_at(&game, "Default__DisTweaks_PlayerPawn").unwrap_or_default(), &top);
     let attrs = merged(&props_at(&game, "Default__DisTweaks_PlayerPawn_Attributes").unwrap_or_default(), &attrs);
     let mantle = deref(&startup, &top, "m_pMantleTweaks").unwrap_or_default();
     let mantle_blink = deref(&startup, &top, "m_pMantleBlinkTweaks").unwrap_or_default();
@@ -515,6 +529,8 @@ pub fn load(install: &Path, difficulty: Difficulty) -> Result<GameData, Error> {
         slide_time: cx.f("m_fSlideTime", fval(&top, "m_fSlideTime"), 1.0),
         slide_percent_not_cancelable: cx.f("m_fSlidePercentNotCancelable", fval(&top, "m_fSlidePercentNotCancelable"), 0.5),
         slide_allow_return_to_sprint: cx.b("m_bSlideAllowReturnToSprint", bval(&top, "m_bSlideAllowReturnToSprint"), false),
+        slide_velocity_deactivate_angle: cx.f("m_fSlideVelocityDeactivateAngle", fval(&top, "m_fSlideVelocityDeactivateAngle"), 25.0),
+        slide_impact_camera_shake: fval(&top, "m_fSlideImpactCameraShake").unwrap_or(0.0),
         auto_crouch_test_distance: cx.f("m_fAutoCrouchTestDistance", fval(&top, "m_fAutoCrouchTestDistance"), 100.0),
         auto_crouch_min_crawl_depth: cx.f("m_fAutoCrouchMinCrawlDepth", fval(&top, "m_fAutoCrouchMinCrawlDepth"), 10.0),
 
@@ -528,6 +544,13 @@ pub fn load(install: &Path, difficulty: Difficulty) -> Result<GameData, Error> {
         lean: LeanTuning {
             lean_speed: cx.f("lean speed", ini("DishonoredGame.StatePlayerMasterLeaning", "m_fLeanSpeed"), 500.0),
             release_time: cx.f("lean release", ini("DishonoredGame.StatePlayerMasterLeaning", "m_fLeanReleaseTime"), 0.2),
+            min_pitch: cx.f("lean min pitch", ini("DishonoredGame.StatePlayerMasterLeaning", "m_fMinAllowedPitchDegrees"), -35.0),
+            max_pitch: cx.f("lean max pitch", ini("DishonoredGame.StatePlayerMasterLeaning", "m_fMaxAllowedPitchDegrees"), 35.0),
+            min_yaw: cx.f("lean min yaw", ini("DishonoredGame.StatePlayerMasterLeaning", "m_fMinAllowedYawDegrees"), -60.0),
+            max_yaw: cx.f("lean max yaw", ini("DishonoredGame.StatePlayerMasterLeaning", "m_fMaxAllowedYawDegrees"), 60.0),
+            max_soften_angle: ini(LEAN, "m_fMaxLeanSoftenAngle").unwrap_or(0.0),
+            max_soften_speed: ini(LEAN, "m_fMaxLeanSoftenSpeed").unwrap_or(0.0),
+            fixed_time_step: cx.f("camera fixed step", ini("DishonoredGame.DishonoredCameraInfluence", "m_fFixedTimeStep"), 1.0 / 60.0),
             max_angle: cx.f("lean max angle", ini(LEAN, "m_fMaxLeanAngle"), 15.0),
             max_angle_crouched: cx.f("lean max angle crouched", ini(LEAN, "m_fMaxLeanAngle_Crouched"), 15.0),
             camera_tilt_percent: cx.f("lean tilt", ini(LEAN, "m_fCameraTiltPercent"), 0.5),

@@ -41,6 +41,10 @@ pub struct MotionTuning {
     pub slide_time: f32,
     pub slide_not_cancelable_pct: f32,
     pub slide_allow_return_to_sprint: bool,
+    /// The slide stops dead when something turns it further than this.
+    pub slide_deactivate_angle_deg: f32,
+    /// Camera shake when it does (the game's strength value).
+    pub slide_impact_shake: f32,
     pub auto_crouch_test_distance: f32,
 
     pub min_pitch_deg: f32,
@@ -88,14 +92,30 @@ pub struct PowerJumpTuning {
     pub held_accel: f32,
 }
 
+/// The lean (`NOTES.md` §5g).
 #[derive(Clone, Debug)]
 pub struct LeanTuning {
+    /// How fast the head moves while lean is held (uu/s).
+    pub lean_speed: f32,
+    /// The lean lasts this long after letting go (the view stays limited).
+    pub release_time: f32,
+    /// View limits while leaning, around the view when the lean started.
+    pub min_pitch_deg: f32,
+    pub max_pitch_deg: f32,
+    pub min_yaw_deg: f32,
+    pub max_yaw_deg: f32,
     pub max_angle_deg: f32,
     pub max_angle_crouched_deg: f32,
+    /// How far, and how fast, the angle limit gives when held against it.
+    pub max_soften_angle_deg: f32,
+    pub max_soften_speed: f32,
     pub camera_tilt_pct: f32,
+    /// The pivot is this many collision heights below the head.
     pub height_pct: f32,
     pub springiness: f32,
     pub damping: f32,
+    /// The camera's fixed step.
+    pub fixed_time_step: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -244,6 +264,8 @@ impl MotionTuning {
             slide_time: p.slide_time,
             slide_not_cancelable_pct: p.slide_percent_not_cancelable,
             slide_allow_return_to_sprint: p.slide_allow_return_to_sprint,
+            slide_deactivate_angle_deg: p.slide_velocity_deactivate_angle,
+            slide_impact_shake: p.slide_impact_camera_shake,
             auto_crouch_test_distance: p.auto_crouch_test_distance,
             min_pitch_deg: p.min_view_pitch,
             max_pitch_deg: p.max_view_pitch,
@@ -252,6 +274,15 @@ impl MotionTuning {
             bob_amount: p.bob_amount,
             roll_amount: p.roll_amount,
             lean: LeanTuning {
+                lean_speed: p.lean.lean_speed,
+                release_time: p.lean.release_time,
+                min_pitch_deg: p.lean.min_pitch,
+                max_pitch_deg: p.lean.max_pitch,
+                min_yaw_deg: p.lean.min_yaw,
+                max_yaw_deg: p.lean.max_yaw,
+                max_soften_angle_deg: p.lean.max_soften_angle,
+                max_soften_speed: p.lean.max_soften_speed,
+                fixed_time_step: p.lean.fixed_time_step,
                 max_angle_deg: p.lean.max_angle,
                 max_angle_crouched_deg: p.lean.max_angle_crouched,
                 camera_tilt_pct: p.lean.camera_tilt_percent,

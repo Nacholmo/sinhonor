@@ -595,6 +595,62 @@ edge height (that clear height minus the box half-height), whether it was a hard
 - The game spreads the search over frames within `m_fMaxMantleCheckTimePerTick_ms` and keeps the last spot found; the kit
   searches when it needs a spot.
 
+## 5g. Slide and lean: behaviour specification (2026-10-09)
+
+The slide and the lean, as `crates/dis_motion` implements them (`controller.rs` for the slide and the lean's view limits,
+`camera.rs` for the lean camera), written as a specification in our own words. Values are read at runtime.
+
+### Data used at runtime
+
+- **Slide**: Corvo's tweak root (`DisTweaks_PlayerPawn`, over its class defaults): `m_fSlideTime`,
+  `m_fSlidePercentNotCancelable`, `m_fSlideVelocityDeactivateAngle` (class default 25°), `m_fSlideImpactCameraShake`,
+  `m_bSlideAllowReturnToSprint`; the `m_GroundSpeedCrouch` attribute.
+- **Lean state**, `DefaultPlayerState.ini` `[StatePlayerMasterLeaning]`: `m_fLeanSpeed`, `m_fLeanReleaseTime`, and the view
+  limits `m_fMin/MaxAllowedPitchDegrees` and `m_fMin/MaxAllowedYawDegrees`.
+- **Lean camera**, `DefaultCamera.ini` `[DishonoredCamera_Lean]`: `m_LeanConstants` (springiness, damping),
+  `m_fLeanHeightPct`, `m_fMaxLeanAngle`, `m_fMaxLeanAngle_Crouched`, `m_fMaxLeanSoftenAngle`, `m_fMaxLeanSoftenSpeed`,
+  `m_fCameraTiltPercent`; it steps at `[DishonoredCameraInfluence] m_fFixedTimeStep`.
+
+### Slide
+
+- **Start**: the start velocity is the player's horizontal velocity; the target is the same direction at crouch speed.
+- **Each physics step**, while not yet freed: with `f` the elapsed fraction of `m_fSlideTime` (0 to 1), the horizontal
+  velocity is `start + (target − start)·(1 − cos πf)/2`, an ease that starts and ends gently. Then the player moves as
+  walking does.
+- **Turned aside**: if, after moving, the velocity's direction is more than `m_fSlideVelocityDeactivateAngle` from the start
+  direction (a wall took it), the slide ends with an impact: the velocity is zeroed and the camera shakes by
+  `m_fSlideImpactCameraShake`. Otherwise, if something slowed it below the target speed, the easing stops and the slide
+  carries on under ordinary walking physics.
+- **Ending**: after `m_fSlideTime`; on leaving the ground; or cancelled: pulling back (forward axis below −0.8) or no longer
+  crouching ends it, but only once `m_fSlidePercentNotCancelable` of the slide has passed. At the end the player may go back
+  to sprinting if `m_bSlideAllowReturnToSprint` (false for Corvo).
+- The game's slide also knocks over and damages things in its way (`m_SlideDamageInfo`) and scares rats; not in the kit.
+
+### Lean
+
+- **The lean state** pushes the lean camera's head point at `m_fLeanSpeed` toward the leaning side (or forward, for the
+  game's forward lean; the two combine and are scaled back to that speed). It lasts `m_fLeanReleaseTime` after the
+  lean is let go. While it lasts, the view's yaw and pitch stay within the allowed range around the view when it
+  started.
+- **The lean camera** holds a head point in view space (forward, right, up), resting at the eye. Each fixed step:
+  - while pushed, its velocity is the push; otherwise a spring (`m_LeanConstants`) pulls it back: acceleration
+    `−springiness·position − damping·velocity` (or just stopping when it is already at rest), integrated velocity first;
+  - the lever: the pivot is `m_fLeanHeightPct` × 2 × the collision half-height below the resting head (the lever eases to a new
+    length at 10 per second), and the head is kept at that distance from it, so it swings out and drops a little;
+  - the angle limit (`m_fMaxLeanAngle`, or the crouched one, easing at 10 per second) clamps the lever's sideways and
+    forward angles. Held against it, the limit gives by up to `m_fMaxLeanSoftenAngle`, rising at `m_fMaxLeanSoftenSpeed`;
+    once it stops being pressed, the give fades at the same rate.
+- **Output**: the head offset between the last two steps is turned into the view (including its pitch) and added to the
+  eye. The camera rolls by `m_fCameraTiltPercent` of the lever's sideways angle.
+
+### Still open for the slide and lean
+- The game's lean collision (`m_fLeanCamCollisionHeightRatio`, and stopping the push against the wall it hit). The kit sweeps
+  the camera from the eye to the leaned position and holds the head short of whatever is in the way.
+- The forward lean needs an input the kit doesn't have yet; and what starts the lean state (the kit leans only when
+  standing still).
+- `m_SwordUnsheathedSpeedFactor` (0.9 for Corvo) scales the slide's target speed while the sword is out; it also enters the
+  walking speeds, so it belongs with the walking model (§6).
+
 ## 6. Player motion: where the data lives (2026-10-07)
 
 All of this is read at runtime by `crates/dis_data`. Values are not repeated here.
@@ -649,8 +705,9 @@ carrying-corpse variant). The vertical velocity of the base the player stands on
 | Drop assassination: target search, lock-on dive, side, landing place and hold time | **Follows the game's behaviour** (§5b), with tweak values, anchors and timings read at runtime |
 | Sword: swing choice and chaining, reach, target, blade sweep, environment hits, damage | **Follows the game's behaviour** (§5c); with several characters in one sweep the kit takes the first |
 | Ground assassination: availability, side, slow/fast pacing, plain kill, victim placement, hold time | **Follows the game's behaviour** (§5d), with tweak values, anchors and timings read at runtime |
-| Slide | Speed bleeds from entry speed to crouch speed over `m_fSlideTime`, with a cancel window. Modelled, not exact |
-| Lean, bob, landing dip | Spring and procedural approximations; the game drives bob from `Ply_Nav_LocoCamera_at` (needs the Edge decoder) |
+| Slide | **Follows the game's behaviour** (§5g): eased velocity, impact stop, cancels; without the slide damage |
+| Lean | **Follows the game's lean camera** (§5g): head point on a lever, spring, angle limit with softening, tilt, view limits; collision is the kit's own |
+| Bob, landing dip | Procedural approximations; the game drives bob from `Ply_Nav_LocoCamera_at` |
 | Ladder, swim | Simple models using the game's speeds and accelerations |
 | Agility: levels, modifiers, power jump (all three jump styles), fall limits, level II speeds | **Follows the game's behaviour** (§5e), with the power list and attributes read at runtime |
 
@@ -828,7 +885,7 @@ Blink, Agility, the drop and ground assassinations, the sword, tests), `wwise` (
 the game's particle effects, sword fights and drop and ground assassinations on box guards, and `--autopilot` verification routes).
 
 Next:
-1. Match the game's Slide and Leaning states, and replace the models above.
+1. Dishonored's own walking ("LocoNew") with `m_SwordUnsheathedSpeedFactor`, the lean's collision and forward lean.
 2. The other passive powers' motion effects, if any are wanted (Vitality, Bloodthirsty and Shadow Kill don't change motion).
 3. Drive camera bob and mantle camera motion from the game's camera animations (the Edge decoder now exists).
 4. SubUV flipbooks and original particle material scrolling/distortion; Blink's screen
