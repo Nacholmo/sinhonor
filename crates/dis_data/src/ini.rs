@@ -41,6 +41,14 @@ impl Ini {
             .map(String::as_str)
     }
 
+    /// Every value of a repeated key, in file order.
+    pub fn all(&self, section: &str, key: &str) -> &[String] {
+        self.sections
+            .get(&section.to_ascii_lowercase())
+            .and_then(|s| s.get(&key.to_ascii_lowercase()))
+            .map_or(&[], Vec::as_slice)
+    }
+
     pub fn f32(&self, section: &str, key: &str) -> Option<f32> {
         self.get(section, key)?.parse().ok()
     }

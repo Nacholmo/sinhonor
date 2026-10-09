@@ -22,7 +22,7 @@ mod tuning;
 
 pub use blink::{Blink, BlinkEvent, BlinkFx, BlinkMode, BlinkTarget};
 pub use camera::CameraFeel;
-pub use controller::{Input, MantleKind, Motion, MotionState, StepEvents};
+pub use controller::{Input, JumpRun, MantleKind, Motion, MotionState, StepEvents, POWER_JUMP_MIN_HOLD};
 pub use glam::{Vec2, Vec3};
 pub use melee::{Melee, MeleeEvent, MeleeTuning, SwingAnim, SwingKind, SwingRun, SwingSet, CROSSHAIR_HALF_HEIGHT, SWEEP_HALF_HEIGHT};
 pub use takedown::{landing, side_of, victim_placement, AssassinateTuning, Assassination, Awareness, DropAssassinateTuning, DropSide, PawnInfo, Reach, Side, Takedown, TakedownKind, TakedownRun, DIVE_SPEED_SCALE};

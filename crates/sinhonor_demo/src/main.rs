@@ -63,6 +63,18 @@ pub struct Sim {
     frame_moves: Vec<(u32, dis_motion::Vec3, f32)>,
     /// The guards have noticed the player (attacks are sword blows, not assassinations).
     alert: bool,
+    /// Agility's level (0 = not owned), and the tuning for each level.
+    agility: usize,
+    agility_tunings: Vec<MotionTuning>,
+}
+
+const AGILITY_NAMES: [&str; 3] = ["none", "I", "II"];
+
+fn set_agility(sim: &mut Sim, level: usize) {
+    let level = level.min(sim.agility_tunings.len() - 1);
+    sim.agility = level;
+    sim.tuning = sim.agility_tunings[level].clone();
+    sim.motion.tuning = sim.tuning.clone();
 }
 
 /// Game sounds (decoded from the install) and the state that paces them.
@@ -147,10 +159,35 @@ struct Step {
     teleport: Option<[f32; 3]>,
     /// Make the guards notice the player (true) or lose them (false) first.
     alert: Option<bool>,
+    /// Set Agility's level first.
+    agility: Option<usize>,
 }
 
 fn step(name: &'static str, secs: f32, input: MotionInput) -> Step {
-    Step { name, secs, input, view: None, shot: false, teleport: None, alert: None }
+    Step { name, secs, input, view: None, shot: false, teleport: None, alert: None, agility: None }
+}
+
+/// Agility: a held jump without it, then with it, onto the block too high to mantle.
+fn autopilot_agility_script() -> Vec<Step> {
+    let idle = MotionInput::default();
+    let jump = MotionInput { jump: true, move_axis: Vec2::new(0.0, 1.0), ..idle };
+    let fwd = MotionInput { move_axis: Vec2::new(0.0, 1.0), ..idle };
+    vec![
+        Step { teleport: Some([600.0, 650.0, 0.0]), view: Some((0.0, 0.1)), agility: Some(0), shot: true, ..step("before tall block", 0.5, idle) },
+        step("held jump, no agility", 0.45, jump),
+        Step { shot: true, ..step("top, no agility", 0.15, jump) },
+        step("fall back", 1.5, idle),
+        Step { teleport: Some([720.0, 650.0, 0.0]), view: Some((0.0, 0.1)), agility: Some(1), ..step("agility I", 0.5, idle) },
+        step("held jump", 0.53, MotionInput { jump: true, ..idle }),
+        Step { shot: true, ..step("power jump", 0.3, MotionInput { jump: true, ..idle }) },
+        Step { shot: true, ..step("power jump top", 0.4, jump) },
+        step("over the block", 0.2, fwd),
+        step("drop onto it", 1.2, idle),
+        Step { view: Some((0.0, -0.3)), shot: true, ..step("on the block", 0.3, idle) },
+        Step { teleport: Some([0.0, 0.0, 0.0]), view: Some((PI, 0.0)), agility: Some(2), ..step("agility II", 0.5, idle) },
+        Step { shot: true, ..step("agility II sprint", 1.2, MotionInput { sprint: true, ..fwd }) },
+        step("flush", 0.5, idle),
+    ]
 }
 
 /// Ground and water effects: gravel and puddle footsteps, pool splash, swimming, climbing out.
@@ -307,10 +344,12 @@ fn main() {
     let mut game: Option<PathBuf> = None;
     let mut difficulty = dis_data::Difficulty::Normal;
     let mut autopilot = Autopilot::default();
+    let mut agility = 0;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--game" => game = args.next().map(PathBuf::from),
+            "--agility" => agility = args.next().and_then(|a| a.parse().ok()).unwrap_or(0),
             "--difficulty" => {
                 difficulty = match args.next().as_deref() {
                     Some("easy") => dis_data::Difficulty::Easy,
@@ -333,11 +372,12 @@ fn main() {
                     Some("drop") => autopilot.steps = autopilot_drop_script(),
                     Some("sword") => autopilot.steps = autopilot_sword_script(),
                     Some("assassinate") => autopilot.steps = autopilot_assassinate_script(),
+                    Some("agility") => autopilot.steps = autopilot_agility_script(),
                     _ => {}
                 }
             }
             "-h" | "--help" => {
-                println!("usage: sinhonor_demo [--game <Dishonored install dir>] [--difficulty easy|normal|hard|veryhard]");
+                println!("usage: sinhonor_demo [--game <Dishonored install dir>] [--difficulty easy|normal|hard|veryhard] [--agility 0|1|2]");
                 return;
             }
             other => eprintln!("ignoring unknown argument {other}"),
@@ -402,10 +442,13 @@ fn main() {
     for w in &surfaces.warnings {
         eprintln!("texture warning: {w}");
     }
+    // Agility's levels (level 0 owns nothing).
+    let levels = data.power(dis_data::powers::AGILITY).map_or(1, |p| p.levels.len()).max(1);
+    let agility_tunings: Vec<MotionTuning> = (0..levels).map(|l| MotionTuning::from_game(&data.with_power(dis_data::powers::AGILITY, l))).collect();
     let tuning = MotionTuning::from_game(&data);
     let level = level::build(data.melee.default_npc_health);
     let motion = Motion::new(tuning.clone(), level.spawn, level.spawn_yaw);
-    let sim = Sim {
+    let mut sim = Sim {
         motion,
         level,
         tuning,
@@ -422,7 +465,10 @@ fn main() {
         frame_kills: Vec::new(),
         frame_moves: Vec::new(),
         alert: false,
+        agility: 0,
+        agility_tunings,
     };
+    set_agility(&mut sim, agility);
     let sfx = Sfx {
         sounds,
         handles: HashMap::new(),
@@ -776,6 +822,9 @@ fn simulate(
             if let Some(alert) = st.alert {
                 set_alert(&mut sim, alert);
             }
+            if let Some(level) = st.agility {
+                set_agility(&mut sim, level);
+            }
         }
         input = st.input;
         auto.t += dt;
@@ -802,6 +851,12 @@ fn simulate(
         let tier = sim.motion.blink.level;
         let reach = sim.tuning.blink.levels[tier].horiz_distance;
         push_log(&mut sim, format!("Blink tier {} (reach {reach:.0})", tier + 1));
+    }
+    if keys.just_pressed(KeyCode::Digit3) {
+        let level = (sim.agility + 1) % sim.agility_tunings.len();
+        set_agility(&mut sim, level);
+        let pj = sim.tuning.power_jump.jump_z;
+        push_log(&mut sim, format!("Agility {} (power jump {pj:.0})", AGILITY_NAMES.get(level).unwrap_or(&"?")));
     }
     if keys.just_pressed(KeyCode::KeyR) {
         let (spawn, yaw, tuning, level) = (sim.level.spawn, sim.level.spawn_yaw, sim.tuning.clone(), sim.motion.blink.level);
@@ -834,6 +889,9 @@ fn simulate(
     sim.frame_events = ev.clone();
     if ev.jumped {
         push_log(&mut sim, "jump".into());
+    }
+    if ev.power_jumped {
+        push_log(&mut sim, "power jump".into());
     }
     if let Some(k) = ev.mantled {
         push_log(&mut sim, format!("mantle {k:?}"));
@@ -1324,7 +1382,7 @@ fn update_hud(sim: Res<Sim>, mut hud: Query<&mut Text, With<Hud>>) {
     };
     let lvl = &sim.tuning.blink.levels[m.blink.level.min(sim.tuning.blink.levels.len() - 1)];
     let mut s = format!(
-        "{state}   speed {:>4.0} uu/s   vz {:>5.0}   feet z {:>5.0}\nBlink tier {} ({:?})  reach {:.0} x {:.0}\n",
+        "{state}   speed {:>4.0} uu/s   vz {:>5.0}   feet z {:>5.0}\nBlink tier {} ({:?})  reach {:.0} x {:.0}   Agility {}\n",
         m.speed_2d(),
         m.vel.z,
         m.feet().z,
@@ -1332,6 +1390,7 @@ fn update_hud(sim: Res<Sim>, mut hud: Query<&mut Text, With<Hud>>) {
         m.blink.mode,
         lvl.horiz_distance,
         lvl.vert_distance,
+        AGILITY_NAMES.get(sim.agility).unwrap_or(&"?"),
     );
     if let Some(p) = m.melee.target.and_then(|id| sim.level.world.pawn(id).map(|p| (id, p))) {
         s.push_str(&format!("guard {}: {:.0}/{:.0} health\n", p.0, p.1.health, sim.guard_health));
@@ -1353,7 +1412,7 @@ fn update_hud(sim: Res<Sim>, mut hud: Query<&mut Text, With<Hud>>) {
     }
     if sim.show_help {
         s.push_str(&format!(
-            "\nWASD move  Mouse look  Space jump/mantle  Ctrl/C crouch (sprint+crouch = slide)\nShift sprint  Alt walk  Q/E lean  RMB/F hold Blink, release to go  1/2 Blink tier\nLMB sword / assassinate unaware guards (falling onto one: drop assassination)  T guards notice you\nR reset  M mute  G blink gizmos  H hands  F1 help  Esc free cursor / quit\n\nTuning read from {}\n{} warnings; run speed {:.0}, sprint {:.0}, jump {:.0}, gravity {:.0}",
+            "\nWASD move  Mouse look  Space jump/mantle  Ctrl/C crouch (sprint+crouch = slide)\nShift sprint  Alt walk  Q/E lean  RMB/F hold Blink, release to go  1/2 Blink tier\n3 Agility (hold Space through a jump for the power jump)  LMB sword / assassinate unaware guards (falling onto one: drop assassination)  T guards notice you\nR reset  M mute  G blink gizmos  H hands  F1 help  Esc free cursor / quit\n\nTuning read from {}\n{} warnings; run speed {:.0}, sprint {:.0}, jump {:.0}, gravity {:.0}",
             sim.source, sim.warnings, sim.tuning.run_speed, sim.tuning.sprint_speed, sim.tuning.jump_z, sim.tuning.gravity_z
         ));
     }

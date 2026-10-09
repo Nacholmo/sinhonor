@@ -2,7 +2,7 @@
 
 Dishonored's first-person movement and Blink in Rust, with a Bevy test course to try them in.
 
-It isn't a rewrite of the game. It's a portable **motion kit**: walk, sprint, crouch, jump, fall, slide, mantle, lean, swim, ladder, Blink, the sword and the assassinations, built the way [2010-rust-rewrite-mashup](https://github.com/chasmlol/2010-rust-rewrite-mashup) brings Skate 3 into MW2. The movement lives in its own crate, `crates/dis_motion`, which only depends on `glam`. It knows nothing about Bevy, so the same controller can be dropped into any game that can answer a box sweep.
+It isn't a rewrite of the game. It's a portable **motion kit**: walk, sprint, crouch, jump, fall, slide, mantle, lean, swim, ladder, Blink, Agility, the sword and the assassinations, built the way [2010-rust-rewrite-mashup](https://github.com/chasmlol/2010-rust-rewrite-mashup) brings Skate 3 into MW2. The movement lives in its own crate, `crates/dis_motion`, which only depends on `glam`. It knows nothing about Bevy, so the same controller can be dropped into any game that can answer a box sweep.
 
 **No game files ship with this repository.** Every number, sound, effect, texture, mesh and animation is read at startup **from your own installed copy** of Dishonored.
 
@@ -16,7 +16,7 @@ cargo run --release -p sinhonor_demo
 
 The first build takes a few minutes (Bevy is big); after that it's quick.
 
-**Finding the install.** It uses `--game "<path to steamapps/common/Dishonored>"` if you give it, then the `DISHONORED_DIR` environment variable, then common Steam library paths, including the extra libraries listed in Steam's `libraryfolders.vdf`. `--difficulty easy|normal|hard|veryhard` picks which of Corvo's attribute sets is used (Normal by default).
+**Finding the install.** It uses `--game "<path to steamapps/common/Dishonored>"` if you give it, then the `DISHONORED_DIR` environment variable, then common Steam library paths, including the extra libraries listed in Steam's `libraryfolders.vdf`. `--difficulty easy|normal|hard|veryhard` picks which of Corvo's attribute sets is used (Normal by default), and `--agility 1` or `2` starts with Agility's first or second level.
 
 On Linux the demo runs natively on Wayland with a real pointer lock. Under X11 the cursor is confined and re-centred instead.
 
@@ -25,13 +25,14 @@ On Linux the demo runs natively on Wayland with a real pointer lock. Under X11 t
 | Action | Keyboard / mouse |
 |---|---|
 | Move / look | WASD / mouse |
-| Jump, or mantle when a ledge is in reach | Space |
+| Jump, or mantle when a ledge is in reach (hold it through the jump for Agility's power jump) | Space |
 | Crouch (toggle, like the game's default binding) | Ctrl or C |
 | Slide | Crouch while sprinting |
 | Sprint / slow walk | Shift / Alt |
 | Lean left / right | Q / E |
 | Blink: hold to aim, release to go | Right mouse or F |
 | Blink tier I / II | 1 / 2 |
+| Agility: none, I, II (cycles) | 3 |
 | Sword attack, assassination of an unaware guard, or drop assassination while falling onto one | Left mouse |
 | Make the guards notice you (sword fights) or lose you (assassinations) | T |
 | Mute game sounds | M |
@@ -75,6 +76,14 @@ Blink reproduces the behaviour of the game's `DishonoredActivePowerComponent_Bli
 - **Arrival**: your velocity from before the blink is restored, so blink-jumping keeps momentum. Then comes the game's post-blink ledge check (a step-up or a full mantle, using `m_pMantleBlinkTweaks`) and an attempt to stand up.
 - **Cooldown**: 1 s, with the game's cooldown lens effect (`Twk_Blink_Cooldown`, white streaks thrown back past the camera) and a decaying wobble.
 - **Screen effect**: the game's warm-up wobble, travel distortion and blur curves (`m_fMoveBlurMaxStrength` and friends) drive a dedicated lens pass with radial blur, a dark tunnel vignette, animated peripheral distortion and subtle colour separation, alongside the FOV punch. The aim point stays sharp, and the pass fades with the game's cooldown curve. HDR bloom softens the targeting glow; the arms and HUD remain crisp.
+
+### Agility
+
+Agility is the game's passive power `Celerity`. It follows the game's behaviour, specified in `NOTES.md` §5e. Its two levels are read from `DefaultPlayer.ini`'s power list, and each level's attribute modifiers are applied to Corvo's attributes the way the game applies them: a level replaces the one before rather than adding to it.
+
+- **Power jump**: jump and keep holding Space. At the top of the jump Corvo is kicked up again at 13 m/s (`Attribute_JumpZ_PowerJump`, which is nothing without Agility). That's about 7.8 m in all, instead of 2.1 m. Letting go before the top gives an ordinary jump. Only one kick per jump. The game has two more jump styles in its code (a higher jump cut short by letting go, and a push that lasts while held); the install picks this one (`m_JumpStyle` in `DefaultPlayerState.ini`), and the kit supports all three.
+- **Landing**: both levels raise the fall-damage and fall-death speeds (22.5 to 25.5 m/s, and 29 to 35 m/s).
+- **Level II** also makes Corvo sprint 30% and swim 10% faster, plays landings and mantles 50% faster, and changes the sideways and backward sprint multipliers.
 
 ### Sword
 
@@ -144,7 +153,6 @@ The movement needs only the tuning. Everything else is optional and skipped with
 - **Camera**: the head bob is procedural. The game drives it from a camera animation (`Ply_Nav_LocoCamera_at`), which the Edge decoder can now read but nothing plays yet.
 - **Effects**: SubUV flipbooks and the original materials' scrolling/distortion graphs aren't done. Mesh particles use cooked LOD 0 geometry, UVs, vertex colours and rotation curves. The particle materials, tattoo brightness and Blink lens shader approximate the look; they do not reconstruct the original shaders. The world camera uses HDR bloom.
 - **Smoke**: the hand smoke is simulated relative to the camera, so it doesn't trail behind you as it does in the game.
-- **Agility** (power jump, double jump) isn't in yet.
 - **Sword**: no impact sounds, sparks or blood yet (they come from the game's contact system). With several guards in one swing the kit hits the nearest, where the game orders them by the swing's direction. Guards don't fight back, so there's no blocking, parrying or sword locks.
 - **Assassinations**: the guards are boxes that topple over (after being moved into place for a ground assassination). No guard model plays its half of the kill, and the bend-time, story-character and carrying-a-body variants aren't in.
 - **Drop assassination**: the guards are boxes that topple over. No guard model plays its half of the kill yet, and the kill animations' blood lens effect isn't shown.
@@ -155,7 +163,7 @@ The movement needs only the tuning. Everything else is optional and skipped with
 
 A blockout course dressed with the game's textures (`crates/sinhonor_demo/src/level.rs`). You start facing along it.
 
-1. **Mantle wall**, 8 m ahead: five blocks of rising height, 30 cm (step up), 90 cm (low), 1.5 m (medium), 2.2 m (high) and 3.2 m (too high, so Blink onto it).
+1. **Mantle wall**, 8 m ahead: five blocks of rising height, 30 cm (step up), 90 cm (low), 1.5 m (medium), 2.2 m (high) and 3.2 m (too high, so Blink onto it, or power-jump with Agility).
 2. **Stairs** on the right, 20 cm risers up to a 3 m balcony.
 3. **Gravel patch** on the left and a **puddle** on the right, for footsteps and their dust and splashes.
 4. **Pool** behind you to the left: 4 m deep, for swimming and climbing out.
@@ -184,12 +192,14 @@ Then:
 
 ```rust
 let data = dis_data::load(&install, dis_data::Difficulty::Normal)?;
+// Agility's levels are 1 and 2; leave this out for none.
+let data = data.with_power(dis_data::powers::AGILITY, 1);
 let mut motion = Motion::new(MotionTuning::from_game(&data), spawn, yaw);
 // every frame
 let events = motion.update(&world, &input, dt);
 ```
 
-Read back `motion.camera.eye`, `motion.yaw`, `motion.pitch`, `motion.camera.roll` and `motion.camera.fov_deg` for the camera, `motion.state` and `events` for animation and sound, `motion.blink` (mode, target and `fx` screen parameters) for Blink's visuals, and `motion.takedown` (the prompt, the lock-on and the kill under way) plus `events.drop_assassination` and `events.assassination` (which also says where to put the victim) to kill the target on your side, and `motion.melee` (the swing playing and the target) plus `events.melee` (swings, hits with their damage, wall strikes) for the sword. Coordinates are Unreal-style: Z up, centimetres. Convert at your boundary.
+Read back `motion.camera.eye`, `motion.yaw`, `motion.pitch`, `motion.camera.roll` and `motion.camera.fov_deg` for the camera, `motion.state` and `events` (including `power_jumped`) for animation and sound, `motion.blink` (mode, target and `fx` screen parameters) for Blink's visuals, and `motion.takedown` (the prompt, the lock-on and the kill under way) plus `events.drop_assassination` and `events.assassination` (which also says where to put the victim) to kill the target on your side, and `motion.melee` (the swing playing and the target) plus `events.melee` (swings, hits with their damage, wall strikes) for the sword. Coordinates are Unreal-style: Z up, centimetres. Convert at your boundary.
 
 ## Tests
 
@@ -201,6 +211,7 @@ cargo test --workspace
 
 - settling on the floor and running at run speed;
 - the jump apex against ballistics;
+- Agility's power jump: only when jump is held to the top, once, and not without the power; and the other two jump styles;
 - stepping up small ledges and mantling tall ones;
 - the slide bleeding to crouch speed;
 - auto-crouching under a low gap;
@@ -218,9 +229,9 @@ All the tuning is read at runtime by `crates/dis_data`, and `cargo run --release
 
 - **Corvo's tweak tree** (`Startup.upk`): the root is `Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release`. It points at one attribute set per difficulty (each `DisAttribute` holds four values, Easy to VeryHard), the mantle tweaks, a separate mantle tweak used after a blink, and the camera tweaks.
 - **Pawn defaults** (`DishonoredGame.upk`, `Engine.upk`): collision size, crouch size, step height, eye height, ladder speed, walkable floor angle and friction, from the class default objects.
-- **INI files**: gravity, lean springs, swim strokes, FOV, bob and roll.
+- **INI files**: gravity, lean springs, swim strokes, FOV, bob and roll, the jump style, and the powers' upgrade levels with their attribute modifiers.
 - **Animation lengths** (`Startup.upk`): mantles, slides and landings last as long as the animations that play them.
-- **Behaviour**: Blink's targeting, travel, end and screen effect, and the jump, follow the behaviour specified in `NOTES.md` §5; the drop assassination follows §5b, the sword §5c and the ground assassination §5d. No game code, decompiled or otherwise, is in this repository.
+- **Behaviour**: Blink's targeting, travel, end and screen effect, and the jump, follow the behaviour specified in `NOTES.md` §5; the drop assassination follows §5b, the sword §5c, the ground assassination §5d and Agility §5e. No game code, decompiled or otherwise, is in this repository.
 
 ## Layout
 
@@ -253,7 +264,7 @@ The `examples/` of `upk`, `cascade`, `edge_anim`, `wwise` and `dis_data` are the
 
 ## Screenshot mode
 
-`cargo run --release -p sinhonor_demo -- --autopilot shots` plays a scripted route with no mouse needed: a mantle, a blink, the ladder, the rooftop blink, a slide, a close-up of the Blink marker and the arrival lens effect. It prints the motion state at each checkpoint, saves a PNG of each into `shots/`, and quits. Add `--route fx` for the effects route instead: the Blink marker near and far, mid-travel, gravel, puddle, falling into the pool, swimming and climbing out. `--route drop` plays the three drop assassinations: off the balcony, diving from the rooftop, and blinking up beside a guard. `--route sword` chains three swings into a guard, swings at a wall and makes a sneak attack. `--route assassinate` assassinates one guard from behind (slow) and another from the side (fast). It's handy for checking nothing broke after a change.
+`cargo run --release -p sinhonor_demo -- --autopilot shots` plays a scripted route with no mouse needed: a mantle, a blink, the ladder, the rooftop blink, a slide, a close-up of the Blink marker and the arrival lens effect. It prints the motion state at each checkpoint, saves a PNG of each into `shots/`, and quits. Add `--route fx` for the effects route instead: the Blink marker near and far, mid-travel, gravel, puddle, falling into the pool, swimming and climbing out. `--route drop` plays the three drop assassinations: off the balcony, diving from the rooftop, and blinking up beside a guard. `--route sword` chains three swings into a guard, swings at a wall and makes a sneak attack. `--route assassinate` assassinates one guard from behind (slow) and another from the side (fast). `--route agility` holds a jump at the 3.2 m block without Agility and then with it (power jump, then onto the block), and sprints with Agility II. It's handy for checking nothing broke after a change.
 
 ## Purpose and scope
 

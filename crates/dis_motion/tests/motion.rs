@@ -47,6 +47,7 @@ fn tuning() -> MotionTuning {
         backward_mult_sneak: 0.7,
         backward_mult_sprint: 0.5,
         jump_z: 500.0,
+        power_jump: PowerJumpTuning::default(),
         air_control: 0.2,
         fall_damage_speed: 1500.0,
         fall_death_speed: 2500.0,
@@ -204,6 +205,65 @@ fn jump_apex_matches_ballistics() {
     assert!(landed);
 }
 
+/// Jumps from the floor, holding jump for `hold` seconds; returns the highest the feet got and
+/// how many power jumps there were.
+fn jump_peak(t: MotionTuning, hold: f32) -> (f32, usize) {
+    let w = floor_world();
+    let mut m = Motion::new(t, Vec3::ZERO, 0.0);
+    run(&mut m, &w, Input::default(), 0.3);
+    let ground = m.feet().z;
+    let (mut peak, mut power): (f32, usize) = (0.0, 0);
+    let dt = 1.0 / 60.0;
+    for i in 0..240 {
+        let input = Input { jump: (i as f32) * dt < hold, ..Default::default() };
+        let e = m.update(&w, &input, dt);
+        peak = peak.max(m.feet().z - ground);
+        power += usize::from(e.power_jumped);
+    }
+    (peak, power)
+}
+
+#[test]
+fn power_jump_kicks_in_at_the_top_of_a_held_jump() {
+    let mut t = tuning();
+    t.power_jump = PowerJumpTuning { style: JumpStyle::FixedPower, jump_z: 600.0, ..Default::default() };
+    let normal = 500.0f32 * 500.0 / 2000.0;
+    // Tapped: an ordinary jump.
+    let (peak, power) = jump_peak(t.clone(), 0.02);
+    assert!((peak - normal).abs() < 8.0 && power == 0, "tap: {peak} {power}");
+    // Let go before the top: still ordinary.
+    let (peak, power) = jump_peak(t.clone(), 0.3);
+    assert!((peak - normal).abs() < 8.0 && power == 0, "early release: {peak} {power}");
+    // Held through the top: kicked up again, once.
+    let (peak, power) = jump_peak(t.clone(), 3.0);
+    let expected = normal + 600.0 * 600.0 / 2000.0;
+    assert!((peak - expected).abs() < 10.0 && power == 1, "held: {peak} vs {expected}, {power}");
+    // Without the power (Agility not owned) holding changes nothing.
+    let (peak, power) = jump_peak(tuning(), 3.0);
+    assert!((peak - normal).abs() < 8.0 && power == 0, "no power: {peak} {power}");
+}
+
+#[test]
+fn held_power_jump_is_cut_short_by_letting_go() {
+    let mut t = tuning();
+    t.power_jump = PowerJumpTuning { style: JumpStyle::HeldPowerFullStop, full_stop_z: 700.0, extra_stop_vel: 300.0, held_time: 0.1, ..Default::default() };
+    let (full, power) = jump_peak(t.clone(), 3.0);
+    assert!((full - 700.0 * 700.0 / 2000.0).abs() < 10.0 && power == 1, "held: {full}");
+    let (cut, _) = jump_peak(t, 0.05);
+    assert!(cut < 80.0, "let go early: {cut}");
+}
+
+#[test]
+fn continuous_power_jump_pushes_while_held() {
+    let mut t = tuning();
+    t.power_jump = PowerJumpTuning { style: JumpStyle::ContinuousPower, full_stop_z: 1.0, held_time: 0.2, held_accel: 1500.0, ..Default::default() };
+    let normal = 500.0f32 * 500.0 / 2000.0;
+    let (tapped, _) = jump_peak(t.clone(), 0.02);
+    let (held, power) = jump_peak(t, 3.0);
+    assert!(tapped < normal + 30.0, "tapped: {tapped}");
+    assert!(held > normal + 60.0 && power == 1, "held: {held} {power}");
+}
+
 #[test]
 fn steps_up_small_ledges_and_mantles_tall_ones() {
     let mut w = floor_world();
@@ -344,6 +404,16 @@ fn real_install_tuning_drives_motion() {
     let travelled = m.pos.x - x0;
     let reach = t.blink.levels[0].horiz_distance;
     assert!(travelled > reach * 0.8 && travelled < reach + 50.0, "travelled {travelled} of {reach}");
+
+    // Agility: no power jump without it; with either level, a held jump goes higher than a tap.
+    assert_eq!(t.power_jump.jump_z, 0.0);
+    for level in [1, 2] {
+        let agile = MotionTuning::from_game(&data.with_power(dis_data::powers::AGILITY, level));
+        assert!(agile.power_jump.jump_z > 0.0, "Agility {level}");
+        let (tap, _) = jump_peak(agile.clone(), 0.02);
+        let (held, power) = jump_peak(agile, 3.0);
+        assert!(held > tap * 1.5 && power == 1, "Agility {level}: held {held}, tap {tap}");
+    }
 }
 
 /// A floor with one 175 cm character at the origin, facing +X.

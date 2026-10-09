@@ -8,6 +8,7 @@
 pub mod ini;
 pub mod effects;
 pub mod melee;
+pub mod powers;
 pub mod sounds;
 pub mod surfaces;
 pub mod takedown;
@@ -65,6 +66,17 @@ pub struct PlayerTuning {
     pub backward_mult_sneak: f32,
     pub backward_mult_sprint: f32,
     pub jump_z_attribute: f32,
+    /// How the jump button can lift a jump further (`StatePlayerMasterJump.m_JumpStyle`).
+    pub jump_style: JumpStyle,
+    /// The power jump's upward speed (`m_JumpZ_PowerJump`); Agility raises it from nothing.
+    pub jump_z_power_jump: f32,
+    /// For the held and continuous jump styles: `m_PowerJumpFullStop_PROTOTYPE`,
+    /// `m_FullStop_ExtraStopVel_PROTOTYPE`, `m_HeldPowerJumpButtonTime_PROTOTYPE` and
+    /// `m_HeldPowerJumpAccel_PROTOTYPE`.
+    pub power_jump_full_stop: f32,
+    pub full_stop_extra_stop_vel: f32,
+    pub held_power_jump_button_time: f32,
+    pub held_power_jump_accel: f32,
     pub jump_impulse: f32,
     pub air_control: f32,
     pub max_speed_before_fall_damage: f32,
@@ -91,6 +103,18 @@ pub struct PlayerTuning {
     /// Ledge finder used right after a blink (separate tweak object in the game).
     pub mantle_blink: MantleTuning,
     pub fall_stun_velocity: f32,
+}
+
+/// `StatePlayerMasterJump.eDisJumpStyle`, in the game's order.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum JumpStyle {
+    /// Holding jump to the top of a jump kicks the player up again (the game's setting).
+    #[default]
+    FixedPower,
+    /// A higher jump from the start; letting go of jump cuts the climb.
+    HeldPowerFullStop,
+    /// Holding jump keeps pushing the player up for a while.
+    ContinuousPower,
 }
 
 #[derive(Clone, Debug)]
@@ -177,6 +201,8 @@ pub struct GameData {
     pub drop_assassinate: takedown::DropAssassinateTuning,
     pub assassinate: takedown::AssassinateTuning,
     pub melee: melee::MeleeTuning,
+    /// Passive powers and their levels (Agility is [`powers::AGILITY`]).
+    pub powers: Vec<powers::Power>,
     /// Player animation lengths in seconds (`SequenceLength / RateScale`), keyed by sequence name,
     /// from the first-person `Ply_*` AnimSets in `Startup.upk`.
     pub anim_lengths: std::collections::HashMap<String, f32>,
@@ -186,6 +212,68 @@ pub struct GameData {
 impl GameData {
     pub fn anim(&self, name: &str) -> Option<f32> {
         self.anim_lengths.get(name).copied()
+    }
+
+    pub fn power(&self, name: &str) -> Option<&powers::Power> {
+        self.powers.iter().find(|p| p.name.eq_ignore_ascii_case(name))
+    }
+
+    /// This data with the passive power `name` owned at `level` (its index in the power's levels;
+    /// for Agility 1 and 2 are the two upgrades). Call it on the data as loaded: a level's
+    /// modifiers replace the previous level's rather than adding to them, as in the game.
+    pub fn with_power(&self, name: &str, level: usize) -> GameData {
+        let mut g = self.clone();
+        if let Some(l) = self.power(name).and_then(|p| p.levels.get(level)) {
+            g.player.apply(&l.modifiers);
+        }
+        g
+    }
+}
+
+impl PlayerTuning {
+    /// The motion attribute with the game's name (`Attribute_<name>` without the prefix).
+    pub fn attribute_mut(&mut self, name: &str) -> Option<&mut f32> {
+        Some(match name {
+            "GroundSpeed" => &mut self.ground_speed,
+            "GroundSpeedSprint" => &mut self.ground_speed_sprint,
+            "GroundSpeedCrouch" => &mut self.ground_speed_crouch,
+            "GroundSpeedWalk" => &mut self.ground_speed_walk,
+            "GroundSpeedSlowWalk" => &mut self.ground_speed_slow_walk,
+            "WaterSpeed" => &mut self.water_speed,
+            "AccelerationRate" => &mut self.accel_rate,
+            "GroundStrafeMultiplierRun" => &mut self.strafe_mult_run,
+            "GroundStrafeMultiplierSneak" => &mut self.strafe_mult_sneak,
+            "GroundStrafeMultiplierSprint" => &mut self.strafe_mult_sprint,
+            "GroundBackwardMultiplierRun" => &mut self.backward_mult_run,
+            "GroundBackwardMultiplierSneak" => &mut self.backward_mult_sneak,
+            "GroundBackwardMultiplierSprint" => &mut self.backward_mult_sprint,
+            "JumpZ" => &mut self.jump_z_attribute,
+            "JumpZ_PowerJump" => &mut self.jump_z_power_jump,
+            "PowerJumpFullStop_PROTOTYPE" => &mut self.power_jump_full_stop,
+            "FullStop_ExtraStopVel_PROTOTYPE" => &mut self.full_stop_extra_stop_vel,
+            "HeldPowerJumpButtonTime_PROTOTYPE" => &mut self.held_power_jump_button_time,
+            "HeldPowerJumpAccel_PROTOTYPE" => &mut self.held_power_jump_accel,
+            "MaxSpeedBeforeFallingDamage" => &mut self.max_speed_before_fall_damage,
+            "MaxSpeedBeforeFallingDeath" => &mut self.max_speed_before_fall_death,
+            "LandAnimRate" => &mut self.land_anim_rate,
+            "MantleAnimRate" => &mut self.mantle_anim_rate,
+            _ => return None,
+        })
+    }
+
+    /// Applies attribute modifiers, each attribute's in order from its current value. Attributes
+    /// that aren't about motion (health, mana...) are skipped.
+    pub fn apply(&mut self, modifiers: &[powers::AttributeModifier]) {
+        let mut done: Vec<&str> = Vec::new();
+        for m in modifiers {
+            if done.contains(&m.attribute.as_str()) {
+                continue;
+            }
+            done.push(&m.attribute);
+            if let Some(v) = self.attribute_mut(&m.attribute) {
+                *v = powers::modified(*v, modifiers.iter().filter(|o| o.attribute == m.attribute));
+            }
+        }
     }
 }
 
@@ -325,12 +413,14 @@ pub fn load(install: &Path, difficulty: Difficulty) -> Result<GameData, Error> {
     let engine_pawn = props_at(&engine, "Default__Pawn").unwrap_or_default();
     let phys_vol = props_at(&engine, "Default__PhysicsVolume").unwrap_or_default();
     let water_vol = props_at(&engine, "Default__WaterVolume").unwrap_or_default();
-    let game = open(install, "DishonoredGame.upk")?;
 
     // --- player tweak tree (Startup.upk) ---
     let top = props_at(&startup, "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release")?;
     let attr_field = format!("m_pAttributeTweaks[{}]", difficulty.index());
     let attrs = deref(&startup, &top, &attr_field).ok_or_else(|| Error::Missing(attr_field.clone()))?;
+    let game = open(install, "DishonoredGame.upk")?;
+    // Attributes Corvo's tweak leaves out keep the class defaults.
+    let attrs = merged(&props_at(&game, "Default__DisTweaks_PlayerPawn_Attributes").unwrap_or_default(), &attrs);
     let mantle = deref(&startup, &top, "m_pMantleTweaks").unwrap_or_default();
     let mantle_blink = deref(&startup, &top, "m_pMantleBlinkTweaks").unwrap_or_default();
     let camera = deref(&startup, &top, "m_pCameraTweaks").unwrap_or_default();
@@ -400,6 +490,17 @@ pub fn load(install: &Path, difficulty: Difficulty) -> Result<GameData, Error> {
         backward_mult_sneak: cx.f("m_GroundBackwardMultiplierSneak", a("m_GroundBackwardMultiplierSneak"), 1.0),
         backward_mult_sprint: cx.f("m_GroundBackwardMultiplierSprint", a("m_GroundBackwardMultiplierSprint"), 1.0),
         jump_z_attribute: cx.f("m_JumpZ", a("m_JumpZ"), 500.0),
+        jump_style: match cfg.get("DishonoredGame.StatePlayerMasterJump", "m_JumpStyle").and_then(|v| v.strip_prefix("eDisJumpStyle_FixedNormalJump_")) {
+            Some("HeldPowerJump_FullStop") => JumpStyle::HeldPowerFullStop,
+            Some("ContinuousPowerJump") => JumpStyle::ContinuousPower,
+            _ => JumpStyle::FixedPower,
+        },
+        // Without Agility these are all zero, and UE3 leaves zero values out.
+        jump_z_power_jump: a("m_JumpZ_PowerJump").unwrap_or(0.0),
+        power_jump_full_stop: a("m_PowerJumpFullStop_PROTOTYPE").unwrap_or(0.0),
+        full_stop_extra_stop_vel: a("m_FullStop_ExtraStopVel_PROTOTYPE").unwrap_or(0.0),
+        held_power_jump_button_time: a("m_HeldPowerJumpButtonTime_PROTOTYPE").unwrap_or(0.0),
+        held_power_jump_accel: a("m_HeldPowerJumpAccel_PROTOTYPE").unwrap_or(0.0),
         jump_impulse: cx.f("m_fJumpImpulse", fval(&top, "m_fJumpImpulse"), 500.0),
         air_control: cx.f("m_fAirControl", fval(&top, "m_fAirControl"), 0.1),
         max_speed_before_fall_damage: cx.f("m_MaxSpeedBeforeFallingDamage", a("m_MaxSpeedBeforeFallingDamage"), 2000.0),
@@ -533,7 +634,12 @@ pub fn load(install: &Path, difficulty: Difficulty) -> Result<GameData, Error> {
     let (drop_assassinate, assassinate) = takedown::load(&mut cx, install, &startup, &game);
     let melee = melee::load(&mut cx, &startup, &game, &ppawn, difficulty);
 
-    Ok(GameData { install: install.to_path_buf(), difficulty, player, blink, drop_assassinate, assassinate, melee, anim_lengths, warnings: cx.warnings })
+    let powers = powers::parse_powers(cfg.all("DishonoredGame.DishonoredPowersComponent", "m_Powers"));
+    if !powers.iter().any(|p| p.name == powers::AGILITY) {
+        cx.warnings.push("Agility (Celerity) not found in DefaultPlayer.ini".into());
+    }
+
+    Ok(GameData { install: install.to_path_buf(), difficulty, player, blink, drop_assassinate, assassinate, melee, powers, anim_lengths, warnings: cx.warnings })
 }
 
 /// Parses `(m_Springiness=80.0,m_Damping=12.0)`.

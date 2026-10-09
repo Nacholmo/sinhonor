@@ -1,17 +1,22 @@
 //! The player movement state machine: walk/run/sprint/crouch, jump and fall with air control,
-//! slide, mantle (ledge finder), lean, swim, ladder, Blink travel and the drop assassination.
+//! Agility's power jump, slide, mantle (ledge finder), lean, swim, ladder, Blink travel and the
+//! takedowns.
 
 use crate::blink::{BlinkEvent, PawnView};
 use crate::camera::{CameraFeel, CameraInput};
 use crate::collide::{find_floor, move_slide, step_up, SKIN};
 use crate::melee::{Melee, MeleeEvent, Swordsman};
 use crate::takedown::{self, Assassination, Faller, Reach, Takedown, TakedownKind, TakedownRun, DIVE_SPEED_SCALE};
-use crate::{yaw_axes, Blink, MantleTuning, MotionTuning, Side, Vec2, Vec3, World};
+use crate::{yaw_axes, Blink, JumpStyle, MantleTuning, MotionTuning, Side, Vec2, Vec3, World};
 
 /// Longest physics substep; larger frames are split.
 const MAX_SUBSTEP: f32 = 1.0 / 90.0;
 /// Extra distance below the feet that still counts as standing (lets the pawn follow stairs down).
 const FLOOR_SNAP: f32 = 4.0;
+/// How long jump must have been held, at the top of a jump, for the fixed power jump (game constant).
+pub const POWER_JUMP_MIN_HOLD: f32 = 0.05;
+/// Upward speed at or below which a jump has reached its top (game constant).
+const JUMP_TOP_SPEED: f32 = 1e-4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MotionState {
@@ -56,6 +61,8 @@ pub enum MantleKind {
 #[derive(Clone, Debug, Default)]
 pub struct StepEvents {
     pub jumped: bool,
+    /// Agility's power jump kicked in.
+    pub power_jumped: bool,
     /// Downward speed at touchdown.
     pub landed: Option<f32>,
     pub fall_damage: Option<f32>,
@@ -70,6 +77,15 @@ pub struct StepEvents {
     pub melee: Vec<MeleeEvent>,
     /// A ground assassination started (the target is dead; place it as given for the paired kill).
     pub assassination: Option<Assassination>,
+}
+
+/// A jump on its way up. It ends at the top of the jump (or of the power jump).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct JumpRun {
+    /// How long jump has been held.
+    pub held: f32,
+    /// The power jump has been used (or, for the continuous style, the push is over).
+    pub power: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -112,6 +128,7 @@ pub struct Motion {
     pub last_mantle: Option<MantleKind>,
     pub takedown: Takedown,
     pub melee: Melee,
+    pub jump: Option<JumpRun>,
     crouch_wanted: bool,
     auto_crouched: bool,
     prev: Input,
@@ -139,6 +156,7 @@ impl Motion {
             last_mantle: None,
             takedown: Takedown::default(),
             melee: Melee::default(),
+            jump: None,
             crouch_wanted: false,
             auto_crouched: false,
             prev: Input::default(),
@@ -237,6 +255,9 @@ impl Motion {
     }
 
     fn substep(&mut self, world: &dyn World, input: &Input, prev: &Input, dt: f32, ev: &mut StepEvents) {
+        if self.state != MotionState::Falling {
+            self.jump = None;
+        }
         // --- Blink runs alongside every state; travelling takes over movement. ---
         let half = self.half();
         let can_blink = !matches!(self.state, MotionState::Mantling | MotionState::Takedown) && self.takedown.diving.is_none();
@@ -441,10 +462,7 @@ impl Motion {
                 // No room to stand: no jump.
             } else {
                 self.crouch_wanted = false;
-                self.vel.z = t.jump_z;
-                self.state = MotionState::Falling;
-                self.fall_peak_speed = 0.0;
-                ev.jumped = true;
+                self.take_off(ev);
                 return;
             }
         }
@@ -521,7 +539,71 @@ impl Motion {
 
     // ----------------------------------------------------------------- falling
 
+    /// Leaves the ground in a jump. With the held power-jump style, the jump is a power jump from
+    /// the start.
+    fn take_off(&mut self, ev: &mut StepEvents) {
+        let p = &self.tuning.power_jump;
+        let power = p.style == JumpStyle::HeldPowerFullStop && p.held_time > JUMP_TOP_SPEED;
+        self.vel.z = if power { p.full_stop_z } else { self.tuning.jump_z };
+        self.jump = Some(JumpRun { held: 0.0, power });
+        self.state = MotionState::Falling;
+        self.fall_peak_speed = 0.0;
+        ev.jumped = true;
+        ev.power_jumped = power;
+    }
+
+    /// Agility's power jump, on the way up a jump (`NOTES.md` §5e).
+    fn jump_tick(&mut self, input: &Input, dt: f32, ev: &mut StepEvents) {
+        let Some(mut run) = self.jump else { return };
+        let p = &self.tuning.power_jump;
+        match p.style {
+            JumpStyle::FixedPower => {
+                if self.vel.z <= JUMP_TOP_SPEED {
+                    // At the top: still holding jump gives the power jump, once.
+                    if run.power || run.held <= POWER_JUMP_MIN_HOLD || p.jump_z <= JUMP_TOP_SPEED {
+                        self.jump = None;
+                        return;
+                    }
+                    self.vel.z = p.jump_z;
+                    run.power = true;
+                    ev.power_jumped = true;
+                }
+                if !run.power {
+                    // Letting go starts the count again.
+                    run.held = if input.jump { run.held + dt } else { 0.0 };
+                }
+            }
+            JumpStyle::HeldPowerFullStop => {
+                if run.power && !input.jump {
+                    self.vel.z = self.vel.z.min(p.extra_stop_vel);
+                }
+            }
+            JumpStyle::ContinuousPower => {
+                if !run.power && p.full_stop_z > JUMP_TOP_SPEED {
+                    if !input.jump {
+                        run.power = true;
+                    } else {
+                        run.held += dt;
+                        if run.held > p.held_time {
+                            run.power = true;
+                            ev.power_jumped = true;
+                        }
+                    }
+                    if !run.power {
+                        self.vel.z += p.held_accel * dt;
+                    }
+                }
+            }
+        }
+        if p.style != JumpStyle::FixedPower && self.vel.z <= JUMP_TOP_SPEED {
+            self.jump = None;
+            return;
+        }
+        self.jump = Some(run);
+    }
+
     fn fall(&mut self, world: &dyn World, input: &Input, dt: f32, ev: &mut StepEvents) {
+        self.jump_tick(input, dt, ev);
         let t = self.tuning.clone();
         let (dir, max_speed) = self.wish(input);
         // Air control: a fraction of ground acceleration, never adding speed past the cap.
@@ -604,9 +686,7 @@ impl Motion {
         let cancelable = frac >= t.slide_not_cancelable_pct;
         if cancelable && Self::pressed(input.jump, prev.jump) && self.set_crouched(world, false) {
             self.crouch_wanted = false;
-            self.vel.z = t.jump_z;
-            self.state = MotionState::Falling;
-            ev.jumped = true;
+            self.take_off(ev);
             return;
         }
         if cancelable && Self::pressed(input.crouch, prev.crouch) && self.set_crouched(world, false) {
@@ -830,6 +910,7 @@ impl Motion {
                 // Lock on: stop drifting and plunge straight down.
                 self.takedown.diving = Some(target);
                 self.vel = Vec3::new(0.0, 0.0, self.vel.z.min(0.0) * DIVE_SPEED_SCALE);
+                self.jump = None;
                 ev.dove_at = Some(target);
                 false
             }

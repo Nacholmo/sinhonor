@@ -259,7 +259,8 @@ Parameter names the materials read: `BlinkDistancePercentage`, `BlinkStepProgres
 `BlinkTimeElapsed`, `BlinkWarmupTime`, `BlinkCooldownTime`, `BlinkStepsTaken`, `BlinkLensIntensity`, `Blink_opacity`, `BlinkTargeting`.
 
 ### Still open for Blink
-- What exactly the 3 `m_Levels` slots map to (they're indexed by `CurrentLevel`; only two have rune costs).
+- Which of the 3 `m_Levels` slots each Blink tier uses. For the passive powers (§5e) the slot is the owned level and only that
+  level's modifiers apply; Blink's own tweak levels are likely chosen the same way.
 - The exact sideways axes used by the close-collision nudge (world Y versus aim-relative).
 - The ledge detector (step-up mantle and full mantle) belongs to the movement work below.
 
@@ -463,6 +464,62 @@ specification in our own words.
   versions while carrying a body (`..._CarryCorpse_Master`).
 - The kit takes "in a fight" (which forces the fast kill) to be never; a host with AI should feed it.
 
+## 5e. Agility: behaviour specification (2026-10-09)
+
+Agility (the game's passive power `Celerity`) makes Corvo jump much higher, survive harder landings and, at its second
+level, move faster. This is the behaviour `crates/dis_motion` (the power jump, `controller.rs`) and `crates/dis_data`
+(`powers.rs`, the levels) implement, written as a specification in our own words. Values are read at runtime.
+
+### Data used at runtime
+
+- **The power list**, `DefaultPlayer.ini`, `[DishonoredGame.DishonoredPowersComponent]`, one `m_Powers=(...)` line per
+  passive power: `m_Name`, and `m_Levels`, each with `m_RuneCost` and `m_Modifiers`. A modifier names an attribute
+  (`m_AttributeName="Attribute_<Name>"`, the field `m_<Name>` of Corvo's attribute tweak), a type (`m_ModType`: `AddVal`,
+  `AddBasePercent` or `SetVal`) and a value (`m_fModValue`). Agility has three levels: `[0]` costs nothing and changes
+  nothing, `[1]` is Agility I and `[2]` is Agility II. `m_CurrentLevel=-1` means not owned.
+- **Corvo's attributes** (§6): `m_JumpZ_PowerJump` and the four `..._PROTOTYPE` jump attributes are left at the class
+  defaults (`Default__DisTweaks_PlayerPawn_Attributes`), zero, so without Agility there is no power jump.
+- **The jump style**, `DefaultPlayerState.ini`, `[DishonoredGame.StatePlayerMasterJump] m_JumpStyle`. The install uses
+  `eDisJumpStyle_FixedNormalJump_FixedPowerJump`. `m_fPowerJumpFOV` is 0, every `m_PowerJumpPostProcess` override is off and
+  no `m_pPowerJumpSoundEvent` is set, so the power jump has no screen effect or sound of its own.
+
+### Levels and modifiers
+
+- Owning a power at a level applies **that level's modifiers only**. Changing level removes the old level's modifiers
+  and adds the new level's: levels replace each other, they don't stack. This is why Agility II repeats Agility I's jump
+  and fall-damage modifiers.
+- An attribute's value is its base (Corvo's value for the difficulty) with its modifiers applied in order: `AddVal`
+  adds the value, `AddBasePercent` adds that percentage of the base, `SetVal` replaces the value.
+- Agility I: `JumpZ_PowerJump` +1300, fall damage and fall death at 25.5 and 35 m/s, and the prototype jump attributes.
+  Agility II: the same, plus `GroundSpeedSprint` +30%, `WaterSpeed` +10%, `LandAnimRate` and `MantleAnimRate` +50%, and
+  the sprint strafe and backward multipliers set to 0.5 and 0.4.
+
+### The jump
+
+A jump takes off at `m_JumpZ` (or, for the held style below, already as a power jump). While it rises the player is in
+the jump state, which ends at the top of the jump (upward speed at or below 0.0001 uu/s): then the player is falling.
+
+- **Fixed power jump** (the game's setting). On the way up, the time jump is held is counted; letting go resets it to 0.
+  At the top, if the count is above 0.05 s and the power jump is available (`JumpZ_PowerJump` above zero) and hasn't
+  been used in this jump, the upward speed is **set** to `JumpZ_PowerJump` and the jump carries on rising. At the next
+  top it ends. So: hold jump through the jump and Corvo is kicked up a second time.
+- **Held power jump with full stop** (`..._HeldPowerJump_FullStop`, not used by the install). Available when
+  `HeldPowerJumpButtonTime_PROTOTYPE` is above zero: the jump takes off at `PowerJumpFullStop_PROTOTYPE`, and while jump
+  isn't held the upward speed is capped at `FullStop_ExtraStopVel_PROTOTYPE`.
+- **Continuous power jump** (`..._ContinuousPowerJump`, not used by the install). Available when
+  `PowerJumpFullStop_PROTOTYPE` is above zero: from a normal take-off, while jump stays held the player is pushed up at
+  `HeldPowerJumpAccel_PROTOTYPE` until it has been held longer than `HeldPowerJumpButtonTime_PROTOTYPE`. Letting go ends
+  the push for this jump.
+
+### Host side
+
+`GameData::with_power(AGILITY, level)` applies a level to the loaded data (call it on the data as loaded), and
+`MotionTuning::from_game` carries the jump into `MotionTuning::power_jump`. `StepEvents::power_jumped` reports the kick.
+
+### Still open for Agility
+- Whether the power jump also triggers controller rumble or a camera effect (there's no FOV change in the shipped
+  settings), and whether jumping while carrying a body or from a moving base changes it.
+
 ## 6. Player motion: where the data lives (2026-10-07)
 
 All of this is read at runtime by `crates/dis_data`. Values are not repeated here.
@@ -502,7 +559,7 @@ and the lean spring constants, angles, tilt and height ratio.
 
 **Jump (`StatePlayerMasterJump`).** Z velocity is set from the `m_JumpZ` attribute (or the
 carrying-corpse variant). The vertical velocity of the base the player stands on is added, then physics switches to Falling.
-`m_JumpStyle` selects other variants that use different attributes (power jump). `m_fJumpImpulse` is not the normal jump.
+`m_JumpStyle` selects how the jump button lifts a jump further (Agility's power jump, §5e). `m_fJumpImpulse` is not the normal jump.
 
 ### Fidelity of the current motion core
 
@@ -520,7 +577,7 @@ carrying-corpse variant). The vertical velocity of the base the player stands on
 | Slide | Speed bleeds from entry speed to crouch speed over `m_fSlideTime`, with a cancel window. Modelled, not exact |
 | Lean, bob, landing dip | Spring and procedural approximations; the game drives bob from `Ply_Nav_LocoCamera_at` (needs the Edge decoder) |
 | Ladder, swim | Simple models using the game's speeds and accelerations |
-| Agility (power jump, double jump) | Not implemented yet |
+| Agility: levels, modifiers, power jump (all three jump styles), fall limits, level II speeds | **Follows the game's behaviour** (§5e), with the power list and attributes read at runtime |
 
 ## 6b. Sound (Wwise), read at runtime (2026-10-07)
 
@@ -692,13 +749,13 @@ format. Formats seen: DXT1, DXT5, ARGB8 and G8. `Textures.tfc` is 1.2 GB, so mip
 ## 7. Status and next steps
 
 Done: `upk` (package, texture reader), `dis_data` (tuning, sound and effect loader), `dis_motion` (motion core and
-Blink, the drop and ground assassinations, the sword, tests), `wwise` (sound packages), `cascade` (particle runtime), `edge_anim` (Edge animation decoder), and `sinhonor_demo` (Bevy course with Corvo's animated arms and sword, sounds,
+Blink, Agility, the drop and ground assassinations, the sword, tests), `wwise` (sound packages), `cascade` (particle runtime), `edge_anim` (Edge animation decoder), and `sinhonor_demo` (Bevy course with Corvo's animated arms and sword, sounds,
 the game's particle effects, sword fights and drop and ground assassinations on box guards, and `--autopilot` verification routes).
 
 Next:
 1. Match the game's mantle edge finder (`DishonoredMantleEdgeFinderComponent`) more closely,
    and the Slide and Leaning states. Replace the models above.
-2. Agility: `StatePlayerMasterJump` style variants and the `Attribute_*_PowerJump*` modifiers in `DefaultPlayer.ini`.
+2. The other passive powers' motion effects, if any are wanted (Vitality, Bloodthirsty and Shadow Kill don't change motion).
 3. Drive camera bob and mantle camera motion from the game's camera animations (the Edge decoder now exists).
 4. SubUV flipbooks and original particle material scrolling/distortion; Blink's screen
    post-process material (`BlinkDistancePercentage` and the other parameters) instead of the approximate lens shader.

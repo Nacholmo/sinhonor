@@ -32,6 +32,8 @@ pub struct MotionTuning {
     pub backward_mult_sneak: f32,
     pub backward_mult_sprint: f32,
     pub jump_z: f32,
+    /// Agility's power jump; all zero without it.
+    pub power_jump: PowerJumpTuning,
     pub air_control: f32,
     pub fall_damage_speed: f32,
     pub fall_death_speed: f32,
@@ -57,6 +59,33 @@ pub struct MotionTuning {
     pub drop_assassinate: DropAssassinateTuning,
     pub melee: MeleeTuning,
     pub assassinate: AssassinateTuning,
+}
+
+/// How the jump button can lift a jump further, in the game's order of jump styles.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum JumpStyle {
+    /// Still holding jump at the top of a jump kicks the player up again (the game's setting).
+    #[default]
+    FixedPower,
+    /// A higher jump from the start; letting go of jump cuts the climb.
+    HeldPowerFullStop,
+    /// Holding jump keeps pushing the player up for a while.
+    ContinuousPower,
+}
+
+/// The power jump (`NOTES.md` §5e). With every speed at zero there is none, as without Agility.
+#[derive(Clone, Debug, Default)]
+pub struct PowerJumpTuning {
+    pub style: JumpStyle,
+    /// Fixed style: the upward speed the player is given at the top of a held jump.
+    pub jump_z: f32,
+    /// Held style: the take-off speed, cut to `extra_stop_vel` when jump is let go. Continuous
+    /// style: above zero, the push is available.
+    pub full_stop_z: f32,
+    pub extra_stop_vel: f32,
+    /// Continuous style: how long holding jump keeps pushing, and how hard (uu/s²).
+    pub held_time: f32,
+    pub held_accel: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -190,6 +219,18 @@ impl MotionTuning {
             backward_mult_sneak: p.backward_mult_sneak,
             backward_mult_sprint: p.backward_mult_sprint,
             jump_z: p.jump_z_attribute,
+            power_jump: PowerJumpTuning {
+                style: match p.jump_style {
+                    dis_data::JumpStyle::FixedPower => JumpStyle::FixedPower,
+                    dis_data::JumpStyle::HeldPowerFullStop => JumpStyle::HeldPowerFullStop,
+                    dis_data::JumpStyle::ContinuousPower => JumpStyle::ContinuousPower,
+                },
+                jump_z: p.jump_z_power_jump,
+                full_stop_z: p.power_jump_full_stop,
+                extra_stop_vel: p.full_stop_extra_stop_vel,
+                held_time: p.held_power_jump_button_time,
+                held_accel: p.held_power_jump_accel,
+            },
             air_control: p.air_control,
             fall_damage_speed: p.max_speed_before_fall_damage,
             fall_death_speed: p.max_speed_before_fall_death,
