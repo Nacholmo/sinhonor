@@ -12,8 +12,8 @@ use bevy::render::camera::ClearColorConfig;
 use bevy::render::mesh::{Indices, PrimitiveTopology};
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::render::view::{NoFrustumCulling, RenderLayers};
-use dis_data::viewmodel::{MeshPart, ParticleNotify, ViewModel};
-use dis_motion::{BlinkMode, MotionState};
+use dis_data::viewmodel::{MeshPart, ParticleNotify, SoundNotify, ViewModel};
+use dis_motion::{BlinkMode, MotionState, Side};
 use edge_anim::Joint;
 use glam::{Mat4, Quat, Vec3 as GVec3};
 
@@ -42,6 +42,11 @@ impl Layer {
         if self.current.as_ref() == Some(&t) {
             return;
         }
+        self.restart(name, looping);
+    }
+    /// Plays `name` from the start even if it is already playing (a new sword swing).
+    fn restart(&mut self, name: &str, looping: bool) {
+        let t = Track { name: name.to_string(), looping };
         if let Some(cur) = self.current.take() {
             self.previous = Some((cur, self.time));
             self.fade = BLEND;
@@ -49,22 +54,30 @@ impl Layer {
         self.current = Some(t);
         self.time = 0.0;
     }
-    /// Advances the clock and returns the particle notifies of the current track passed in
-    /// `[old time, new time)`, wrapping for loops.
-    fn advance(&mut self, dt: f32, vm: &ViewModel) -> Vec<ParticleNotify> {
+    /// Advances the clock and returns the particle and sound notifies of the current track
+    /// passed in `[old time, new time)`, wrapping for loops.
+    fn advance(&mut self, dt: f32, vm: &ViewModel) -> (Vec<ParticleNotify>, Vec<SoundNotify>) {
         let mut fired = Vec::new();
+        let mut sounds = Vec::new();
         if let Some(t) = &self.current {
-            if let (Some(list), Some(a)) = (vm.particle_notifies.get(&t.name), vm.anims.get(&t.name)) {
+            if let Some(a) = vm.anims.get(&t.name) {
                 let (from, to) = (self.time, self.time + dt);
-                for n in list {
-                    let hit = if t.looping && a.duration > 0.0 {
-                        let k = ((from - n.time) / a.duration).ceil();
-                        n.time + k * a.duration < to
+                let passed = |time: f32| {
+                    if t.looping && a.duration > 0.0 {
+                        let k = ((from - time) / a.duration).ceil();
+                        time + k * a.duration < to
                     } else {
-                        n.time >= from && n.time < to && n.time <= a.duration
-                    };
-                    if hit {
+                        time >= from && time < to && time <= a.duration
+                    }
+                };
+                for n in vm.particle_notifies.get(&t.name).into_iter().flatten() {
+                    if passed(n.time) {
                         fired.push(n.clone());
+                    }
+                }
+                for n in vm.sound_notifies.get(&t.name).into_iter().flatten() {
+                    if passed(n.time) {
+                        sounds.push(n.clone());
                     }
                 }
             }
@@ -77,7 +90,7 @@ impl Layer {
         if self.fade <= 0.0 {
             self.previous = None;
         }
-        fired
+        (fired, sounds)
     }
     /// Finished a one-shot?
     fn done(&self, vm: &ViewModel) -> bool {
@@ -110,7 +123,30 @@ pub struct Hands {
     sword_socket: Mat4,
     /// Live animation effects that follow a socket or bone: (effect id, bone, offset).
     attached_fx: Vec<(u64, usize, Mat4)>,
+    /// `camera_jnt` in the idle pose: where the view sits when no animation moves it.
+    rest_cam: Option<Mat4>,
+    /// While a kill animation moves the view: its offset from the rest pose, in the view's own
+    /// space (Bevy axes, metres).
+    pub cam_offset: Option<Transform>,
+    /// Sounds the kill animations posted this frame (event, volume), for the audio system.
+    pub posted_sounds: Vec<(String, f32)>,
     pub visible: bool,
+}
+
+/// Animations that bring their own sounds (the kills and the sword swings); the others are voiced
+/// by the motion cues.
+pub fn posts_own_sounds(clip: &str) -> bool {
+    ["Sword_Ready_Assassination", "Sword_Ready_Attack", "Sword_Sneak_Attack", "Sword_Ready_Fatality"].iter().any(|p| clip.starts_with(p))
+}
+
+/// Corvo's first-person animation for a drop assassination from `side`.
+pub fn drop_clip(side: Side) -> &'static str {
+    match side {
+        Side::Front => "Sword_Ready_Assassination_DropFront_Master",
+        Side::Left => "Sword_Ready_Assassination_DropLeft_Master",
+        Side::Right => "Sword_Ready_Assassination_DropRight_Master",
+        Side::Back => "Sword_Ready_Assassination_DropBack_Master",
+    }
 }
 
 #[derive(Component)]
@@ -223,6 +259,9 @@ pub fn setup_hands(
     ));
     commands.spawn((DirectionalLight { illuminance: 3500.0, shadows_enabled: false, ..default() }, Transform::IDENTITY, layer, ViewmodelLight));
 
+    let rest_cam = vm.anims.get("Sword_Ready_Idle").and_then(|a| a.evaluate(&vm.skeleton, 0.0, false).ok()).map(|p| {
+        world_pose(bones, |i| Mat4::from_rotation_translation(p[i].rotation, p[i].translation))[find("camera_jnt")]
+    });
     commands.insert_resource(Hands {
         cam_joint: find("camera_jnt"),
         attach_joint: find("handAttachment_R_jnt"),
@@ -240,6 +279,9 @@ pub fn setup_hands(
         landing: 0.0,
         sword_socket: asset_socket.map_or(Mat4::IDENTITY, rotator) * sword_origin,
         attached_fx: Vec::new(),
+        rest_cam,
+        cam_offset: None,
+        posted_sounds: Vec::new(),
         visible: true,
         vm,
     });
@@ -335,6 +377,7 @@ pub fn update_hands(
         MotionState::Swimming => (if moving { "Empty_SwimN" } else { "Empty_SwimIdle" }, true),
         MotionState::Falling | MotionState::Ladder => ("Sword_Ready_Jump", false),
         MotionState::Blinking => ("Sword_Ready_Idle", true),
+        MotionState::Takedown => (m.takedown.run.map_or("Sword_Ready_Idle", |r| drop_clip(r.side)), false),
         MotionState::Walking if h.landing > 0.0 => ("Sword_Ready_JumpLandSmall", false),
         MotionState::Walking => match (m.crouched, moving, m.sprinting, speed < 250.0) {
             (true, false, _, _) => ("Sword_Sneak_Idle", true),
@@ -345,7 +388,18 @@ pub fn update_hands(
             (false, true, false, false) => ("Sword_Ready_Run", true),
         },
     };
-    h.base.play(base, looping);
+    // A sword swing (or its recoil) plays over the base pose, from the start on every new swing.
+    match &m.melee.run {
+        Some(run) if !matches!(m.state, MotionState::Takedown) => {
+            let fresh = sim.frame_events.melee.iter().any(|e| matches!(e, dis_motion::MeleeEvent::Swing { .. } | dis_motion::MeleeEvent::EnvHit { anim: Some(_), .. }));
+            if fresh {
+                h.base.restart(&run.anim.name, false);
+            } else {
+                h.base.play(&run.anim.name, false);
+            }
+        }
+        _ => h.base.play(base, looping),
+    }
 
     let blink = m.blink.mode;
     let left_name = match blink {
@@ -377,14 +431,18 @@ pub fn update_hands(
     h.prev_state = m.state;
     let mut fired = {
         let h = &mut *h;
-        let mut f = h.base.advance(dt, &h.vm);
-        f.extend(h.left.advance(dt, &h.vm));
+        let (mut f, sounds) = h.base.advance(dt, &h.vm);
+        f.extend(h.left.advance(dt, &h.vm).0);
+        // The kill animations bring their own sounds; the others are voiced by the motion cues.
+        if h.base.current.as_ref().is_some_and(|t| posts_own_sounds(&t.name)) {
+            h.posted_sounds.extend(sounds.into_iter().map(|n| (n.event, n.volume)));
+        }
         f
     };
 
     // --- pose: base layer everywhere, power layer on the left arm (not while the body is busy) ---
     let Some(mut pose) = layer_pose(&h.vm, &h.base) else { return };
-    let left_on = !matches!(m.state, MotionState::Mantling | MotionState::Sliding | MotionState::Swimming);
+    let left_on = !matches!(m.state, MotionState::Mantling | MotionState::Sliding | MotionState::Swimming | MotionState::Takedown);
     if !left_on {
         fired.retain(|n| n.socket.as_deref() != Some("Tattoo"));
     }
@@ -399,6 +457,19 @@ pub fn update_hands(
     let to_view = Mat4::from_cols(GVec3::new(0.0, SCALE, 0.0).extend(0.0), GVec3::new(SCALE, 0.0, 0.0).extend(0.0), GVec3::new(0.0, 0.0, SCALE).extend(0.0), glam::Vec4::W);
     let view = to_view * world[h.cam_joint].inverse();
     let _ = h.root_joint;
+    // The kill animations move the view itself (the arms are posed around it): pass on how far
+    // `camera_jnt` is from where it rests.
+    let cam_offset = match (m.state, h.rest_cam) {
+        (MotionState::Takedown, Some(rest)) => {
+            let d = rest.inverse() * world[h.cam_joint];
+            // camera_jnt axes (+X up, +Y right, +Z back) -> Bevy view axes (x right, y up, z back).
+            let axes = Mat4::from_cols(glam::Vec4::Y, glam::Vec4::X, glam::Vec4::Z, glam::Vec4::W);
+            let v = axes * d * axes;
+            let (_, rot, pos) = v.to_scale_rotation_translation();
+            Some(Transform { translation: pos * SCALE, rotation: rot, ..default() })
+        }
+        _ => None,
+    };
 
     // --- animation particle effects, simulated in the viewmodel frame (see fx::Attach) ---
     // camera_jnt (+X up, +Y right, +Z back) -> effect frame (X right, Y back, Z up).
@@ -487,4 +558,5 @@ pub fn update_hands(
             pp.fov = crate::vertical_fov(m.camera.fov_deg, pp.aspect_ratio);
         }
     }
+    h.cam_offset = cam_offset;
 }

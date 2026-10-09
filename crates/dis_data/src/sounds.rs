@@ -72,6 +72,8 @@ pub struct BlinkSoundEvents {
 #[derive(Default)]
 pub struct Sounds {
     pub cues: HashMap<Cue, PlayNode>,
+    /// Events loaded by name (see [`Sounds::add_events`]).
+    pub events: HashMap<String, PlayNode>,
     /// Ogg Vorbis bytes per media id.
     pub ogg: HashMap<u32, Vec<u8>>,
     pub warnings: Vec<String>,
@@ -81,9 +83,40 @@ impl Sounds {
     pub fn get(&self, cue: Cue) -> Option<&PlayNode> {
         self.cues.get(&cue)
     }
+
+    /// Loads Wwise events by name, such as the ones animations post (melee and impact banks
+    /// included). Missing events are reported in `warnings`.
+    pub fn add_events(&mut self, install: &Path, names: impl IntoIterator<Item = String>) {
+        let names: Vec<String> = names.into_iter().filter(|n| !self.events.contains_key(n)).collect();
+        if names.is_empty() {
+            return;
+        }
+        let dir = install.join("DishonoredGame/CookedPCConsole");
+        let packages: Vec<Package> = PACKAGES.iter().chain(&COMBAT_PACKAGES).filter_map(|p| Package::open(dir.join(p)).ok()).collect();
+        for name in names {
+            let Some((pkg, node)) = packages.iter().find_map(|p| p.event(&name).map(|n| (p, n))) else {
+                self.warnings.push(format!("sound event {name} not found"));
+                continue;
+            };
+            for id in node.clips() {
+                if self.ogg.contains_key(&id) {
+                    continue;
+                }
+                match pkg.ogg(id) {
+                    Ok(o) => {
+                        self.ogg.insert(id, o);
+                    }
+                    Err(e) => self.warnings.push(format!("{name}: clip {id:#x}: {e}")),
+                }
+            }
+            self.events.insert(name, node);
+        }
+    }
 }
 
 const PACKAGES: [&str; 4] = ["Bank_Footsteps.pck", "Bank_Player.pck", "Bank_Power_Player.pck", "Bank_UI_Ingame_Water.pck"];
+/// Sword and impact sounds, which the kill animations post.
+const COMBAT_PACKAGES: [&str; 2] = ["Bank_Weapon.pck", "Bank_Impact.pck"];
 
 pub fn load_sounds(install: &Path, blink: &BlinkSoundEvents) -> Sounds {
     let mut out = Sounds::default();

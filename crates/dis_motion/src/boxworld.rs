@@ -1,7 +1,7 @@
 //! A simple [`World`] made of axis-aligned boxes, water volumes and ladders. Good for tests,
 //! prototypes and blockout levels; real hosts implement [`World`] over their own physics.
 
-use crate::{Hit, Ladder, Vec3, Water, World};
+use crate::{Hit, Ladder, PawnInfo, Vec3, Water, World};
 
 #[derive(Clone, Copy, Debug)]
 pub struct Aabb {
@@ -37,7 +37,12 @@ pub struct BoxWorld {
     pub water: Vec<Aabb>,
     pub ladders: Vec<(Aabb, Vec3)>,
     pub blink_blockers: Vec<Aabb>,
+    /// Characters that can be taken down, by actor id.
+    pub characters: Vec<(u32, PawnInfo)>,
 }
+
+/// A box has no skeleton, so a box character's torso is taken at this fraction of its height.
+pub const BOX_TORSO_HEIGHT: f32 = 0.7;
 
 const EPS: f32 = 1e-4;
 
@@ -48,6 +53,26 @@ impl BoxWorld {
     }
     pub fn add_pawn(&mut self, center: Vec3, half: Vec3, actor: u32) -> &mut Self {
         self.solids.push(Solid { aabb: Aabb::from_center(center, half), actor, is_pawn: true });
+        self
+    }
+    /// A pawn that can also be fought and taken down, facing `yaw` (radians).
+    pub fn add_character(&mut self, center: Vec3, half: Vec3, actor: u32, yaw: f32, health: f32) -> &mut Self {
+        let floor_z = center.z - half.z;
+        let info = PawnInfo { center, floor_z, torso_z: floor_z + 2.0 * half.z * BOX_TORSO_HEIGHT, yaw, health };
+        self.characters.push((actor, info));
+        self.add_pawn(center, half, actor)
+    }
+    /// Sets a character's health (after the host applies damage).
+    pub fn set_health(&mut self, actor: u32, health: f32) -> &mut Self {
+        if let Some((_, p)) = self.characters.iter_mut().find(|(a, _)| *a == actor) {
+            p.health = health;
+        }
+        self
+    }
+    /// Removes an actor's collision and character entry (e.g. once it is dead).
+    pub fn remove_actor(&mut self, actor: u32) -> &mut Self {
+        self.solids.retain(|s| s.actor != actor);
+        self.characters.retain(|(a, _)| *a != actor);
         self
     }
     pub fn add_water(&mut self, min: Vec3, max: Vec3) -> &mut Self {
@@ -156,5 +181,9 @@ impl World for BoxWorld {
 
     fn blink_blocked(&self, point: Vec3) -> bool {
         self.blink_blockers.iter().any(|b| b.contains(point))
+    }
+
+    fn pawn(&self, actor: u32) -> Option<PawnInfo> {
+        self.characters.iter().find(|(a, _)| *a == actor).map(|(_, p)| *p)
     }
 }

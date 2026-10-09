@@ -17,7 +17,7 @@ use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 use bevy::window::{CursorGrabMode, PrimaryWindow};
 use dis_data::sounds::{Cue, Gait, Sounds, Surface};
 use dis_data::surfaces::Surface as TexSurface;
-use dis_motion::{BlinkEvent, BlinkMode, Input as MotionInput, MantleKind, Motion, MotionState, MotionTuning, StepEvents};
+use dis_motion::{BlinkEvent, BlinkMode, Input as MotionInput, MantleKind, MeleeEvent, Motion, MotionState, MotionTuning, Reach, StepEvents, World};
 use glam::Affine3A as Affine3AId;
 use std::collections::HashMap;
 use std::f32::consts::{FRAC_PI_2, PI};
@@ -54,6 +54,12 @@ pub struct Sim {
     /// This frame's motion events and movement, for the audio system.
     frame_events: StepEvents,
     frame_move: dis_motion::Vec3,
+    /// Bumped when the course is reset (guards stand back up).
+    generation: u32,
+    /// A dummy guard's starting health.
+    guard_health: f32,
+    /// Guards killed this frame (they topple).
+    frame_kills: Vec<u32>,
 }
 
 /// Game sounds (decoded from the install) and the state that paces them.
@@ -82,6 +88,22 @@ impl Sfx {
         self.rng ^= self.rng >> 7;
         self.rng ^= self.rng << 17;
         (self.rng % n.max(1) as u64) as usize
+    }
+
+    /// Plays a Wwise event loaded by name (the ones animations post).
+    fn play_event(&mut self, commands: &mut Commands, event: &str, volume: f32) {
+        if self.muted {
+            return;
+        }
+        let Some(node) = self.sounds.events.get(event).cloned() else { return };
+        if std::env::var_os("SINHONOR_LOG_SFX").is_some() {
+            println!("[sfx] {event}");
+        }
+        let mut ids = node.choose(&mut |n| self.rand(n));
+        ids.dedup();
+        for h in ids.into_iter().filter_map(|id| self.handles.get(&id).cloned()) {
+            commands.spawn((AudioPlayer::new(h), PlaybackSettings::DESPAWN.with_volume(Volume::Linear(volume))));
+        }
     }
 
     fn play(&mut self, commands: &mut Commands, cue: Cue, volume: f32) -> Vec<Entity> {
@@ -155,6 +177,69 @@ fn autopilot_fx_script() -> Vec<Step> {
     ]
 }
 
+/// The sword: a three-swing chain that finishes a guard, a swing into a wall, and a sneak attack.
+fn autopilot_sword_script() -> Vec<Step> {
+    let idle = MotionInput::default();
+    let attack = MotionInput { attack: true, ..idle };
+    let crouch = MotionInput { crouch: true, ..idle };
+    vec![
+        Step { teleport: Some([1650.0, 600.0, 0.0]), view: Some((0.0, -0.1)), shot: true, ..step("facing guard 1", 0.5, idle) },
+        step("forehand", 0.05, attack),
+        Step { shot: true, ..step("forehand blow", 0.25, idle) },
+        step("chain", 0.05, attack),
+        Step { shot: true, ..step("backhand", 0.55, idle) },
+        step("chain again", 0.05, attack),
+        Step { shot: true, ..step("killing blow", 0.45, idle) },
+        Step { shot: true, ..step("guard 1 down", 1.2, idle) },
+        Step { teleport: Some([650.0, 650.0, 0.0]), view: Some((0.0, 0.0)), ..step("facing wall", 0.5, idle) },
+        step("swing at wall", 0.05, attack),
+        Step { shot: true, ..step("recoil", 0.2, idle) },
+        step("recoil done", 0.8, idle),
+        Step { teleport: Some([2000.0, -850.0, 0.0]), view: Some((FRAC_PI_2, -0.1)), ..step("behind guard 2", 0.4, idle) },
+        step("crouch", 0.05, crouch),
+        step("sneak up", 0.5, idle),
+        step("sneak attack", 0.05, attack),
+        Step { shot: true, ..step("sneak blow", 0.3, idle) },
+        step("flush", 0.8, idle),
+    ]
+}
+
+/// Drop assassinations: walking off the balcony onto a guard, diving from a rooftop, and
+/// blinking up beside a guard to fall on it.
+fn autopilot_drop_script() -> Vec<Step> {
+    let fwd = MotionInput { move_axis: Vec2::new(0.0, 1.0), ..default() };
+    let idle = MotionInput::default();
+    // Tapping attack, as a player would when the prompt shows.
+    let tap = |name: &'static str, input: MotionInput| {
+        (0..6).flat_map(move |_| [step(name, 0.034, MotionInput { attack: true, ..input }), step(name, 0.034, input)])
+    };
+    let mut s = vec![Step { teleport: Some([650.0, 1500.0, 300.0]), view: Some((0.0, -0.45)), shot: true, ..step("on balcony", 0.5, idle) }];
+    s.push(step("walk off balcony", 0.55, fwd));
+    s.extend(tap("attack", fwd));
+    s.extend([
+        Step { shot: true, ..step("drop kill landing", 0.1, idle) },
+        Step { shot: true, ..step("drop kill blow", 0.3, idle) },
+        Step { shot: true, ..step("drop kill done", 1.6, idle) },
+        Step { teleport: Some([2840.0, 0.0, 600.0]), view: Some((0.0, -0.5)), shot: true, ..step("on roof edge", 0.5, idle) },
+        step("walk off roof", 0.3, fwd),
+    ]);
+    s.extend(tap("lock on", fwd));
+    s.extend([
+        Step { shot: true, ..step("dive kill", 0.3, idle) },
+        Step { shot: true, ..step("dive kill done", 1.6, idle) },
+        Step { teleport: Some([1500.0, 600.0, 0.0]), view: Some((0.0, 1.0)), ..step("near guard 1", 0.5, idle) },
+        Step { shot: true, ..step("blink up", 0.7, MotionInput { blink: true, ..idle }) },
+        step("release", 0.3, idle),
+    ]);
+    s.extend(tap("falling attack", idle));
+    s.extend([
+        Step { shot: true, ..step("blink drop kill", 0.3, idle) },
+        Step { shot: true, ..step("blink drop done", 1.6, idle) },
+        step("flush", 0.5, idle),
+    ]);
+    s
+}
+
 fn autopilot_script() -> Vec<Step> {
     let fwd = MotionInput { move_axis: Vec2::new(0.0, 1.0), ..default() };
     let idle = MotionInput::default();
@@ -215,9 +300,13 @@ fn main() {
                 }
             }
             "--route" => {
-                // `--route fx` picks the ground/water effects route for --autopilot.
-                if args.next().as_deref() == Some("fx") {
-                    autopilot.steps = autopilot_fx_script();
+                // `--route fx` picks the ground/water effects route for --autopilot, `--route drop`
+                // the drop assassinations, `--route sword` the sword.
+                match args.next().as_deref() {
+                    Some("fx") => autopilot.steps = autopilot_fx_script(),
+                    Some("drop") => autopilot.steps = autopilot_drop_script(),
+                    Some("sword") => autopilot.steps = autopilot_sword_script(),
+                    _ => {}
                 }
             }
             "-h" | "--help" => {
@@ -241,10 +330,7 @@ fn main() {
     for w in &data.warnings {
         eprintln!("warning: {w}");
     }
-    let sounds = dis_data::sounds::load_sounds(&install, &data.blink.sound_events);
-    for w in &sounds.warnings {
-        eprintln!("sound warning: {w}");
-    }
+    let mut sounds = dis_data::sounds::load_sounds(&install, &data.blink.sound_events);
     let viewmodel = match dis_data::viewmodel::load_viewmodel(&install) {
         Ok(vm) => {
             for w in &vm.warnings {
@@ -257,6 +343,24 @@ fn main() {
             None
         }
     };
+    // The drop-assassination and sword animations post their own sounds.
+    let played: std::collections::HashSet<String> = dis_motion::Side::ALL
+        .iter()
+        .map(|s| hands::drop_clip(*s).to_string())
+        .chain(data.melee.swings.iter().flatten().flat_map(|s| [Some(&s.swing), s.env_hit.as_ref(), s.env_hit_chain.as_ref()]).flatten().map(|a| a.name.clone()))
+        .collect();
+    if let Some(vm) = &viewmodel {
+        let events: std::collections::BTreeSet<String> = vm
+            .sound_notifies
+            .iter()
+            .filter(|(clip, _)| played.contains(clip.as_str()))
+            .flat_map(|(_, list)| list.iter().map(|n| n.event.clone()))
+            .collect();
+        sounds.add_events(&install, events);
+    }
+    for w in &sounds.warnings {
+        eprintln!("sound warning: {w}");
+    }
     let effects = dis_data::effects::load_effects(&install);
     for w in &effects.warnings {
         eprintln!("effect warning: {w}");
@@ -266,7 +370,7 @@ fn main() {
         eprintln!("texture warning: {w}");
     }
     let tuning = MotionTuning::from_game(&data);
-    let level = level::build();
+    let level = level::build(data.melee.default_npc_health);
     let motion = Motion::new(tuning.clone(), level.spawn, level.spawn_yaw);
     let sim = Sim {
         motion,
@@ -280,6 +384,9 @@ fn main() {
         debug_gizmos: false,
         frame_events: StepEvents::default(),
         frame_move: dis_motion::Vec3::ZERO,
+        generation: 0,
+        guard_health: data.melee.default_npc_health,
+        frame_kills: Vec::new(),
     };
     let sfx = Sfx {
         sounds,
@@ -318,7 +425,7 @@ fn main() {
         .insert_resource(ClearColor(HORIZON))
         .insert_resource(AmbientLight { color: Color::srgb(0.75, 0.8, 0.9), brightness: 600.0, ..default() })
         .add_systems(Startup, (setup_scene, load_audio, hands::setup_hands, grab_cursor.run_if(|a: Res<Autopilot>| a.steps.is_empty())).chain())
-        .add_systems(Update, (cursor_toggle, gather_look, simulate, play_sounds, fx_triggers, update_camera, hands::update_hands, fx::update_fx, draw_blink, update_hud).chain())
+        .add_systems(Update, (cursor_toggle, gather_look, simulate, play_sounds, fx_triggers, hands::update_hands, update_camera, update_guards, fx::update_fx, draw_blink, update_hud).chain())
         .run();
 }
 
@@ -329,7 +436,6 @@ fn color_for(kind: Kind) -> Color {
         Kind::Ledge => Color::srgb(0.36, 0.30, 0.23),
         Kind::Stairs => Color::srgb(0.33, 0.32, 0.29),
         Kind::Roof => Color::srgb(0.24, 0.19, 0.18),
-        Kind::Guard => Color::srgb(0.65, 0.18, 0.15),
         Kind::Ladder => Color::srgb(0.75, 0.62, 0.20),
         Kind::Water => Color::srgba(0.15, 0.32, 0.45, 0.55),
         Kind::Gravel => Color::srgb(0.24, 0.21, 0.17),
@@ -344,7 +450,7 @@ fn surface_for(kind: Kind) -> Option<(TexSurface, Color, f32)> {
         Kind::Wall | Kind::Ledge => Some((TexSurface::Rock, Color::linear_rgb(1.7, 1.65, 1.6), 4.0)),
         Kind::Roof => Some((TexSurface::Rock, Color::linear_rgb(1.4, 1.2, 1.1), 4.0)),
         Kind::Stairs | Kind::Ladder => Some((TexSurface::Planks, Color::WHITE, 1.5)),
-        Kind::Guard | Kind::Water => None,
+        Kind::Water => None,
     }
 }
 
@@ -470,6 +576,19 @@ fn setup_scene(
         };
         commands.spawn((Mesh3d(meshes.add(box_mesh(lo, hi, tile))), MeshMaterial3d(materials.add(material)), Transform::IDENTITY));
     }
+    // Dummy guards, each with a dark band on its front so its facing shows.
+    let guard_mat = materials.add(StandardMaterial { base_color: Color::srgb(0.65, 0.18, 0.15), perceptual_roughness: 0.9, ..default() });
+    let band_mat = materials.add(StandardMaterial { base_color: Color::srgb(0.08, 0.07, 0.07), perceptual_roughness: 0.9, ..default() });
+    for g in &sim.level.guards {
+        let half = Vec3::new(g.half.x, g.half.z, g.half.y) * SCALE;
+        let rest = Transform::from_translation(to_bevy(g.center)).with_rotation(Quat::from_rotation_y(-g.yaw));
+        commands
+            .spawn((Mesh3d(meshes.add(box_mesh(-half, half, 1.0))), MeshMaterial3d(guard_mat.clone()), rest, GuardBody { actor: g.actor, half, rest, fall: None, generation: 0 }))
+            .with_children(|c| {
+                let band = Vec3::new(0.02, 0.06, half.z * 0.9);
+                c.spawn((Mesh3d(meshes.add(box_mesh(-band, band, 1.0))), MeshMaterial3d(band_mat.clone()), Transform::from_xyz(half.x, half.y * 0.72, 0.0)));
+            });
+    }
     // Overcast sky: pale at the horizon (the fog colour), greyer blue overhead.
     let mut sky = Sphere::new(600.0).mesh().uv(48, 24);
     if let Some(bevy::render::mesh::VertexAttributeValues::Float32x3(p)) = sky.attribute(Mesh::ATTRIBUTE_POSITION) {
@@ -592,6 +711,7 @@ fn simulate(
         walk: keys.pressed(KeyCode::AltLeft),
         lean: axis(KeyCode::KeyE, KeyCode::KeyQ),
         blink: mouse.pressed(MouseButton::Right) || keys.pressed(KeyCode::KeyF),
+        attack: mouse.pressed(MouseButton::Left),
     };
     if !auto.steps.is_empty() {
         // Give the window a moment to come up before starting the script.
@@ -619,8 +739,8 @@ fn simulate(
         if auto.t >= st.secs {
             let m = &sim.motion;
             println!(
-                "[autopilot] {:<18} state {:?} crouched {} pos ({:.0}, {:.0}, feet {:.0}) speed {:.0} blink {:?} fx blur {:.2} dist {:.2}",
-                st.name, m.state, m.crouched, m.pos.x, m.pos.y, m.feet().z, m.speed_2d(), m.blink.mode, m.blink.fx.blur, m.blink.fx.distortion
+                "[autopilot] {:<18} state {:?} crouched {} pos ({:.0}, {:.0}, feet {:.0}) speed {:.0} vz {:.0} blink {:?} fx blur {:.2} dist {:.2} drop {:?}/{:?}",
+                st.name, m.state, m.crouched, m.pos.x, m.pos.y, m.feet().z, m.speed_2d(), m.vel.z, m.blink.mode, m.blink.fx.blur, m.blink.fx.distortion, m.takedown.prompt, m.takedown.diving
             );
             if st.shot {
                 if let Some(dir) = &auto.out {
@@ -644,6 +764,9 @@ fn simulate(
         let (spawn, yaw, tuning, level) = (sim.level.spawn, sim.level.spawn_yaw, sim.tuning.clone(), sim.motion.blink.level);
         sim.motion = Motion::new(tuning, spawn, yaw);
         sim.motion.blink.level = level;
+        let health = sim.guard_health;
+        sim.level = level::build(health);
+        sim.generation += 1;
         push_log(&mut sim, "reset".into());
     }
     if keys.just_pressed(KeyCode::F1) {
@@ -670,6 +793,34 @@ fn simulate(
     }
     if let Some(v) = ev.landed.filter(|v| *v > 400.0) {
         push_log(&mut sim, format!("landed at {v:.0} uu/s{}", if ev.fall_damage.is_some() { " (fall damage!)" } else { "" }));
+    }
+    sim.frame_kills.clear();
+    for e in &ev.melee {
+        match e {
+            MeleeEvent::Hit { target, damage, .. } => {
+                let health = sim.level.world.pawn(*target).map_or(0.0, |p| p.health) - damage;
+                if health <= 0.0 {
+                    sim.level.world.remove_actor(*target);
+                    sim.frame_kills.push(*target);
+                    push_log(&mut sim, format!("sword: guard {target} killed"));
+                } else {
+                    sim.level.world.set_health(*target, health);
+                    let max = sim.guard_health;
+                    push_log(&mut sim, format!("sword: hit guard {target} ({health:.0}/{max:.0})"));
+                }
+            }
+            MeleeEvent::EnvHit { .. } => push_log(&mut sim, "sword: struck the wall".into()),
+            MeleeEvent::Swing { .. } => {}
+        }
+    }
+    if let Some(id) = ev.dove_at {
+        push_log(&mut sim, format!("locked on to guard {id}, diving"));
+    }
+    if let Some((id, side)) = ev.drop_assassination {
+        // The guard is dead: it no longer blocks or can be targeted.
+        sim.level.world.remove_actor(id);
+        sim.frame_kills.push(id);
+        push_log(&mut sim, format!("drop assassination: guard {id}, from the {}", format!("{side:?}").to_lowercase()));
     }
     for b in ev.blink {
         let msg = match b {
@@ -712,9 +863,14 @@ fn surface_at(level: &Level, p: dis_motion::Vec3) -> Surface {
     }
 }
 
-fn play_sounds(mut commands: Commands, time: Res<Time>, keys: Res<ButtonInput<KeyCode>>, sim: Res<Sim>, mut sfx: ResMut<Sfx>) {
+fn play_sounds(mut commands: Commands, time: Res<Time>, keys: Res<ButtonInput<KeyCode>>, sim: Res<Sim>, mut sfx: ResMut<Sfx>, hands: Option<ResMut<hands::Hands>>) {
     if keys.just_pressed(KeyCode::KeyM) {
         sfx.muted = !sfx.muted;
+    }
+    if let Some(mut h) = hands {
+        for (event, volume) in std::mem::take(&mut h.posted_sounds) {
+            sfx.play_event(&mut commands, &event, volume);
+        }
     }
     let dt = time.delta_secs();
     let m = &sim.motion;
@@ -936,6 +1092,10 @@ fn fx_triggers(time: Res<Time>, sim: Res<Sim>, mut sfx: ResMut<Sfx>, mut fxw: Re
         fxw.spawn(Fx::CameraWater, Affine3AId::IDENTITY, fx::Attach::Camera);
     }
     st.prev_state = Some(m.state);
+    // The blade striking the world shakes the view (scaled from the game's shake strength).
+    if let Some(MeleeEvent::EnvHit { shake, .. }) = ev.melee.iter().find(|e| matches!(e, MeleeEvent::EnvHit { .. })) {
+        st.shake = (0.25, shake / 400.0);
+    }
     st.shake.0 = (st.shake.0 - time.delta_secs()).max(0.0);
 }
 
@@ -973,6 +1133,46 @@ pub fn vertical_fov(fov_deg: f32, _aspect: f32) -> f32 {
     fov_deg.to_radians()
 }
 
+/// A dummy guard's body. Killed, it topples away from the player.
+#[derive(Component)]
+struct GuardBody {
+    actor: u32,
+    half: Vec3,
+    rest: Transform,
+    /// Fall direction (Bevy, horizontal) and seconds since the kill.
+    fall: Option<(Vec3, f32)>,
+    generation: u32,
+}
+
+/// When the blow lands, and how long the topple takes (the box's stand-in for the victim's own
+/// death animation).
+const TOPPLE_DELAY: f32 = 0.35;
+const TOPPLE_TIME: f32 = 0.5;
+
+fn update_guards(time: Res<Time>, sim: Res<Sim>, mut guards: Query<(&mut GuardBody, &mut Transform)>) {
+    let dt = time.delta_secs().min(0.1);
+    for (mut g, mut tf) in &mut guards {
+        if g.generation != sim.generation {
+            g.generation = sim.generation;
+            g.fall = None;
+            *tf = g.rest;
+        }
+        if g.fall.is_none() && sim.frame_kills.contains(&g.actor) {
+            let away = (g.rest.translation - to_bevy(sim.motion.pos)).with_y(0.0).normalize_or(g.rest.rotation * Vec3::X);
+            g.fall = Some((away, 0.0));
+        }
+        let Some((dir, t)) = g.fall.map(|(d, t)| (d, t + dt)) else { continue };
+        g.fall = Some((dir, t));
+        let k = ((t - TOPPLE_DELAY) / TOPPLE_TIME).clamp(0.0, 1.0);
+        let angle = FRAC_PI_2 * k * k;
+        let rot = Quat::from_axis_angle(Vec3::Y.cross(dir).normalize(), angle);
+        // Pivot on the bottom edge it falls over.
+        let pivot = g.rest.translation - Vec3::Y * g.half.y + dir * g.half.x;
+        tf.translation = pivot + rot * (g.rest.translation - pivot);
+        tf.rotation = rot * g.rest.rotation;
+    }
+}
+
 /// The player camera's rotation in Bevy space (view direction plus lean/bob roll).
 pub fn camera_rotation(m: &Motion) -> Quat {
     let dir = m.view_dir();
@@ -981,18 +1181,36 @@ pub fn camera_rotation(m: &Motion) -> Quat {
     t.rotation
 }
 
+/// How long the view takes to settle into a kill animation from wherever it was (demo smoothing).
+const TAKEDOWN_EASE: f32 = 0.3;
+
 fn update_camera(
     time: Res<Time>,
     sim: Res<Sim>,
     st: Res<FxState>,
+    hands: Option<Res<hands::Hands>>,
+    mut ease_from: Local<Option<Transform>>,
     mut cams: Query<(&mut Transform, &mut Projection, &mut blink_post::BlinkLens), With<PlayerCam>>,
 ) {
     let Ok((mut tf, mut proj, mut lens)) = cams.single_mut() else { return };
     let m = &sim.motion;
+    let before = *tf;
     let dir = m.view_dir();
     let eye = to_bevy(m.camera.eye);
     *tf = Transform::from_translation(eye).looking_to(Vec3::new(dir.x, dir.z, dir.y), Vec3::Y);
     tf.rotate_local_z(-m.camera.roll);
+    // A kill animation drives the view; ease into it from where the view was.
+    match (m.takedown.run, hands.as_ref().and_then(|h| h.cam_offset)) {
+        (Some(run), Some(offset)) => {
+            let from = *ease_from.get_or_insert(before);
+            let anim = tf.mul_transform(offset);
+            let k = (run.t / TAKEDOWN_EASE).clamp(0.0, 1.0);
+            let w = k * k * (3.0 - 2.0 * k);
+            tf.translation = from.translation.lerp(anim.translation, w);
+            tf.rotation = from.rotation.slerp(anim.rotation, w);
+        }
+        _ => *ease_from = None,
+    }
     let (left, strength) = st.shake;
     if left > 0.0 {
         let k = strength * (left / 0.35).powi(2) * 0.02;
@@ -1025,6 +1243,7 @@ fn update_hud(sim: Res<Sim>, mut hud: Query<&mut Text, With<Hud>>) {
         MotionState::Swimming => "Swimming",
         MotionState::Ladder => "Ladder",
         MotionState::Blinking => "Blinking",
+        MotionState::Takedown => "Drop assassination",
     };
     let lvl = &sim.tuning.blink.levels[m.blink.level.min(sim.tuning.blink.levels.len() - 1)];
     let mut s = format!(
@@ -1037,12 +1256,24 @@ fn update_hud(sim: Res<Sim>, mut hud: Query<&mut Text, With<Hud>>) {
         lvl.horiz_distance,
         lvl.vert_distance,
     );
+    if let Some(p) = m.melee.target.and_then(|id| sim.level.world.pawn(id).map(|p| (id, p))) {
+        s.push_str(&format!("guard {}: {:.0}/{:.0} health\n", p.0, p.1.health, sim.guard_health));
+    }
+    if let Some(r) = &m.melee.run {
+        s.push_str(&format!("sword: {:?} ({})\n", r.kind, r.anim.name));
+    }
+    match (m.takedown.diving, m.takedown.prompt) {
+        (Some(id), _) => s.push_str(&format!("[diving at guard {id}]\n")),
+        (None, Some((_, Reach::InRange))) => s.push_str("[LMB] Drop assassination\n"),
+        (None, Some((_, Reach::Track))) => s.push_str("[LMB] Drop assassination (dive)\n"),
+        _ => {}
+    }
     for l in &sim.log {
         s.push_str(&format!("> {l}\n"));
     }
     if sim.show_help {
         s.push_str(&format!(
-            "\nWASD move  Mouse look  Space jump/mantle  Ctrl/C crouch (sprint+crouch = slide)\nShift sprint  Alt walk  Q/E lean  RMB/F hold Blink, release to go  1/2 Blink tier\nR reset  M mute  G blink gizmos  H hands  F1 help  Esc free cursor / quit\n\nTuning read from {}\n{} warnings; run speed {:.0}, sprint {:.0}, jump {:.0}, gravity {:.0}",
+            "\nWASD move  Mouse look  Space jump/mantle  Ctrl/C crouch (sprint+crouch = slide)\nShift sprint  Alt walk  Q/E lean  RMB/F hold Blink, release to go  1/2 Blink tier\nLMB sword (while falling onto a guard: drop assassination)\nR reset  M mute  G blink gizmos  H hands  F1 help  Esc free cursor / quit\n\nTuning read from {}\n{} warnings; run speed {:.0}, sprint {:.0}, jump {:.0}, gravity {:.0}",
             sim.source, sim.warnings, sim.tuning.run_speed, sim.tuning.sprint_speed, sim.tuning.jump_z, sim.tuning.gravity_z
         ));
     }

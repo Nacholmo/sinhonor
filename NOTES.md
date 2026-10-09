@@ -4,8 +4,10 @@
 [2010-rust-rewrite-mashup](https://github.com/chasmlol/2010-rust-rewrite-mashup) drops Skate 3 skating into IW4L.
 It covers player motion (walk, sprint, crouch, jump, fall, slide, mantle, lean, swim, ladder climb, and the camera feel)
 and the **motion powers**: Blink, plus Agility's power jump and fall-damage changes. All of it is packaged to be modded
-into *other* games. This is *not* a full rewrite of Dishonored. AI, combat, non-motion powers, UI, saves, audio and the
+into *other* games. This is *not* a full rewrite of Dishonored. AI, general combat, non-motion powers, UI, saves, audio and the
 campaign are out of scope. They appear below only where motion or Blink touches them (for example, blink knockdown damage types).
+Two pieces of combat are in scope because they pair with motion and Blink: the **drop assassination** (§5b) and the
+basic **sword attack** (§5c).
 
 Intended shape (mirrors the mashup's `skate/` subsystem): an engine-agnostic motion and Blink crate that asks the host
 for collision through a trait (sweeps, traces, ledge probes); a data crate that reads tuning, tweaks and animation from
@@ -261,6 +263,157 @@ Parameter names the materials read: `BlinkDistancePercentage`, `BlinkStepProgres
 - The exact sideways axes used by the close-collision nudge (world Y versus aim-relative).
 - The ledge detector (step-up mantle and full mantle) belongs to the movement work below.
 
+## 5b. Drop assassination: behaviour specification (2026-10-09)
+
+Falling onto a character and attacking kills it from above. Blink makes this the usual stealth kill: blink above or
+beside a guard, fall, attack. This is the behaviour `crates/dis_motion` implements (`takedown.rs`), written as a
+specification in our own words. Names are the game's reflected property names; values are read at runtime.
+
+### Data used at runtime
+
+- **Corvo's sword tweak**, class `DisTweaks_DropAssassinate`, under `Twk_Inv_PlayerSpecific.Twk_Inv_SwordCorvo` in
+  `Startup.upk`. It falls back to the shared sword tweak (`Twk_Inv_SwordBase`), then to the class defaults
+  (`Default__DisTweaks_DropAssassinate` in `DishonoredGame.upk`). Missing fields are 0, as UE3 omits zero values.
+  Fields: `m_fHitWindowInSeconds` (how far ahead the fall is predicted, 4 s for Corvo), `m_fMinDropDistToTarget` (0),
+  `m_fMaxDropDistToTarget` (3.5 m), `m_fMaxAllowedDropJumpVel` (0), `m_fMinDropDownVel` (1 m/s).
+- `m_DropAssassinateMoveSets[0]` is the human set: one linked action per side (`m_Drop_Front`, `_Left`, `_Right`,
+  `_Back`), pairing Corvo's `Assassinate_Drop_<Side>` with the victim's `DisNPCAnim_AssassinationDrop`, with
+  `m_bSlaveMovesMaster` set: the victim's animation places Corvo. Set `[1]` is the Tallboy's, with direction constraints.
+- **Where Corvo lands**: the victim's half of each pair, `Generic_Assassination_Drop<Side>_Slave`, carries an
+  `anchor_jnt`. At the clip's first frame it sits 50 cm in front of the victim, 80 cm to its left or right, or 60 cm
+  behind it, level with its feet. These clips are with the City Watch's animations (`Npc_CityGuard_Generic_as`) in the
+  mission packages, for example `L_Streets1_P.upk`. They are read from there at runtime.
+- **How long Corvo is held**: his `Sword_Ready_Assassination_Drop<Side>_Master` clips (2.23 s) release him at their
+  `DisNotify_AnimStateUnlock` notify, 1.59 to 1.84 s in depending on the side.
+
+### When a target is looked for
+
+Only while the player is falling (the falling state), every tick: for the on-screen prompt, and when attack is pressed.
+
+1. **Predict the fall** over the hit window `T`: `vz' = min(vz, -m_fMinDropDownVel)`, and the displacement is
+   `d = (vx·T, vy·T, vz'·T + ½·g·T²)`, with `g` the gravity and no horizontal acceleration.
+2. **Sweep the player's own collision box** from its centre to centre + `d`. If that hits nothing, sweep it straight down
+   by `d.z` instead. The first thing hit must be a character, which is then checked as below. A target that was already
+   found is kept while it still passes.
+
+### Checking a target
+
+The target must be alive and not ragdolled. Then all of these must hold:
+
+- the player's vertical speed is below `m_fMaxAllowedDropJumpVel` (0, so the player must be falling, not rising);
+- the predicted drop `-d.z` is more than `m_fMinDropDistToTarget`;
+- the height `h` from the player's feet down to the target's torso (its torso hit region) is more than `m_fMinDropDistToTarget`;
+- sweeping the player's box from its centre to the target's centre hits the target first.
+
+It is then **in range** if `h <= m_fMaxDropDistToTarget`, and otherwise a target to **track**. Awareness plays no part:
+alerted characters can be dropped on too.
+
+### Attacking
+
+- **In range**: the kill starts now.
+- **Track**: the player locks on. Horizontal velocity is cleared and downward speed doubled (`vz = min(vz, 0) · 2`), and
+  steering, jumping, crouching and powers are disabled. Each tick the target is checked again. If it stops passing, the
+  lock is dropped and the fall carries on as normal. Once it is in range, the kill starts.
+
+### The kill
+
+- **Side**: the player's position in the target's frame (x forward, y right). If `|x| <= |y|` it is Right when `y > 0`,
+  else Left. Otherwise it is Front when `x >= 0`, else Back. Move sets list sides in the cardinal-direction order
+  (forward, left, right, back).
+- **Placement**: the player is moved to that side's anchor, on the victim's floor and facing it, and stands up.
+  Velocity is cleared; the kill replaces the landing.
+- **Animation**: Corvo plays `Sword_Ready_Assassination_Drop<Side>_Master`. Its `camera_jnt` carries the view: from
+  just above eye height down into a kneel about 50 cm off the ground over the body, then back up. The arms are posed
+  around that bone, so the world view follows it too. The clip posts its own sounds (`AnimNotify_AkEvent`: sword,
+  impact, landing, cloth), a blood lens effect (`AnimNotify_CameraEffect`) and a `DishonoredNotify_CameraPitchTarget`.
+- The player is released at the clip's unlock notify.
+
+### Host side
+
+Characters belong to the host. A sweep reports them as pawn hits, and `World::pawn` gives each one's centre, floor,
+torso height and facing. `BoxWorld` boxes have no skeleton, so their torso is taken at 70% of their height.
+
+### Still open for the drop assassination
+- What `DishonoredNotify_CameraPitchTarget` (start and target pitch) does to the control rotation; the demo leaves the view
+  level when the kill ends.
+- Whether a wall at the landing anchor is handled specially. The kit stops the player short of it.
+- The Tallboy's direction constraints, the adrenaline the kill grants (`m_fAdrenalineMultOnHit`) and the context-range
+  scale (`m_fRayScalePercent`), none of which the human drop kill needs.
+
+## 5c. Sword attack: behaviour specification (2026-10-09)
+
+Corvo's basic sword swings. This is the behaviour `crates/dis_motion` implements (`melee.rs`), written as a specification
+in our own words. Names are the game's reflected property names; values are read at runtime.
+
+### Data used at runtime
+
+- **Corvo's sword tweak**, class `DisTweaks_MeleeAttackPlayer`, under `Twk_Inv_PlayerSpecific.Twk_Inv_SwordCorvo` in
+  `Startup.upk`. It falls back to the shared sword tweak (`Twk_Inv_SwordBase`) and then the class defaults of
+  `DisTweaks_MeleeAttackPlayer`, `DisTweaks_MeleeAttack` and `DisTweaks_ItemContext` (`DishonoredGame.upk`). Fields used:
+  `m_fMaxContextRange` (2.1 m reach), `m_fRayScalePercent` (0.5), `m_fSweepingAttackSize` (60 cm),
+  `m_fCrosshairAttackSize` (15 cm), `m_fMaxChainAttackTime` (1 s), `m_fAttackDamageMultiplier` (1) and
+  `m_fCamShake_OnHitEnv` (200).
+- **Reach by speed**, on the player pawn (`Default__DishonoredPlayerPawn`): `m_fMinSpeedRayScale` (4 m/s),
+  `m_fRaySpeedScale` (0.005 per uu/s) and `m_fRaySpeedScale_Max` (1.5).
+- **Damage**: the sword's `m_MeleeDamage` attribute (`DisTweaks_InventoryItem_Attributes` under the same sword), 10 at every
+  difficulty. A character with no tweak of its own has `Twk_Pawn_DefaultNPC`'s `m_HealthMax` for the difficulty, 25.
+- **The swings**, by the actions' animation states: forehand `RightAttackA/B` (`Sword_Ready_AttackRight_{A,B}_Small`),
+  backhand `LeftAttackA/B` (`Sword_Ready_AttackLeft_..._Small`), sneak `SneakAttackA` (`Sword_Sneak_Attack_Small`), and the
+  killing blows (`m_ForehandAttacks_Impact` / `m_BackhandAttacks_Impact`, states `Fatality_GenericB` / `_GenericA`:
+  `Sword_Ready_Fatality_Generic_Right_A` / `_Left_A`). When the blade strikes the world the melee tree switches to its
+  environment-hit sequence: the swing's `..._Big` clip, `..._BigChain` for a chained swing, `Sword_Sneak_Attack_BigWall`
+  for the sneak attack.
+- **Timing** comes from each clip's notifies, at its play rate (`RateScale`): `DishonoredNotify_AttackZone` (when the blade
+  can hit; `m_fDamageZoneMaxTime`, 0.05 s, for how long), `DishonoredNotify_ChainInput` (from here a press is kept for the
+  next swing), `DishonoredNotify_AttackInterruptable` (from here the next swing may start) and
+  `DishonoredNotify_AnimStateExit` (the swing is over).
+
+### Choosing the swing
+
+On an attack press with no swing under way, or once the current one is interruptible (a press made from its chain input
+on is kept and starts the next swing as soon as it is):
+
+- The swing is **chained** if the player isn't sneaking (crouched) and the last swing started less than
+  `m_fMaxChainAttackTime` ago, or the press was kept from the last swing.
+- A swing that isn't chained, or that follows a backhand, is a **forehand**; one that is chained after a forehand is a
+  **backhand**. So a chain alternates forehand, backhand, forehand.
+- On the forehand side: a **killing blow** if the targeted character's health is no more than the damage; otherwise the
+  **sneak attack** when sneaking; otherwise the forehand. On the backhand side: a killing blow or the backhand.
+- Which of a swing's variants (A or B) plays is random.
+- The game also has synced short finishers (`m_ForehandKill_Synced`, `m_fChanceOfSyncedAttack`), which need the victim's
+  paired animation. Without one the killing blow is the plain impact swing.
+
+### What the blade hits
+
+- **Reach**: `m_fMaxContextRange · ((f − 1) · m_fRayScalePercent + 1)`, where `f` is 1, or for forward speed `v` above
+  `m_fMinSpeedRayScale`, `1 + min((v − m_fMinSpeedRayScale) · m_fRaySpeedScale, m_fRaySpeedScale_Max)`. Sprinting at
+  6 m/s reaches 3.15 m.
+- **The target** (for the killing-blow choice and the HUD): a box of half-size `(m_fCrosshairAttackSize,
+  m_fCrosshairAttackSize, 10)` swept from the camera along the view for the reach. If it meets the world first, a line
+  along the view gets a second chance at a character.
+- **The blow**: during the attack zone, a box of half-size `(m_fSweepingAttackSize, m_fSweepingAttackSize, 30)` is swept
+  from the camera along the view for the reach. The game gathers every character it passes before the first piece of
+  world geometry, puts the crosshair target first and orders the rest by the swing's direction. A world hit with no
+  character before it is an **environment hit**: the swing switches to its recoil clip and the camera shakes
+  (`m_fCamShake_OnHitEnv`).
+- The kit lets the player keep moving and looking while swinging. The reach bonus for forward speed implies swings
+  happen on the move, but the exact movement rules during a swing aren't confirmed.
+
+### Host side
+
+The kit reports the swing (`Swing`), a hit (`Hit`: target, damage, and whether it kills) and an environment hit
+(`EnvHit`: point, shake, recoil clip). The host applies the damage. `World::pawn` gives each character's health. The kit's
+`World` reports one hit per sweep, so it takes the first character the blade reaches.
+
+### Still open for the sword
+- The order the game sorts several characters in the sweep by (per swing direction), and blows that cut through more than
+  one.
+- Blocking, parrying, sword locks (`m_BigVersus_Action`, `m_fVersusAngle`) and the `Attack_BigHit` reaction need armed
+  opponents.
+- Impact sounds, sparks and blood come from the game's contact system (`DisContactType_Sword`), which isn't read yet.
+- The auto look up and down (`m_bDoAutoLookUp`, `m_bDoAutoLookDown`) and the off-hand swipe the power hand plays
+  (`m_OffhandSwipeForehand`).
+
 ## 6. Player motion: where the data lives (2026-10-07)
 
 All of this is read at runtime by `crates/dis_data`. Values are not repeated here.
@@ -311,7 +464,9 @@ carrying-corpse variant). The vertical velocity of the base the player stands on
 | All speeds, acceleration, air control, gravity, step height, collision sizes, mantle thresholds, slide timing, lean springs, swim | **Game values**, read at runtime |
 | Walking and falling integration | UE3 `CalcVelocity`-style model; Dishonored's own "LocoNew" path not reproduced yet |
 | Strafe and backward multipliers | Applied as a direction ellipse; the game's exact blend is not known |
-| Mantle finder and mantle motion | Modelled from the tweak fields and animation lengths; the game's own edge finder is not reproduced |
+| Mantle finder and mantle motion | Modelled from the tweak fields and animation lengths; the game's own edge finder is not reproduced. Ledges are world geometry only: characters are never mantled onto |
+| Drop assassination: target search, lock-on dive, side, landing place and hold time | **Follows the game's behaviour** (§5b), with tweak values, anchors and timings read at runtime |
+| Sword: swing choice and chaining, reach, target, blade sweep, environment hits, damage | **Follows the game's behaviour** (§5c); with several characters in one sweep the kit takes the first |
 | Slide | Speed bleeds from entry speed to crouch speed over `m_fSlideTime`, with a cancel window. Modelled, not exact |
 | Lean, bob, landing dip | Spring and procedural approximations; the game drives bob from `Ply_Nav_LocoCamera_at` (needs the Edge decoder) |
 | Ladder, swim | Simple models using the game's speeds and accelerations |
@@ -487,8 +642,8 @@ format. Formats seen: DXT1, DXT5, ARGB8 and G8. `Textures.tfc` is 1.2 GB, so mip
 ## 7. Status and next steps
 
 Done: `upk` (package, texture reader), `dis_data` (tuning, sound and effect loader), `dis_motion` (motion core and
-Blink, tests), `wwise` (sound packages), `cascade` (particle runtime), `edge_anim` (Edge animation decoder), and `sinhonor_demo` (Bevy course with Corvo's animated arms and sword, sounds,
-the game's particle effects, and `--autopilot` verification routes).
+Blink, the drop assassination, the sword, tests), `wwise` (sound packages), `cascade` (particle runtime), `edge_anim` (Edge animation decoder), and `sinhonor_demo` (Bevy course with Corvo's animated arms and sword, sounds,
+the game's particle effects, sword fights and drop assassinations on box guards, and `--autopilot` verification routes).
 
 Next:
 1. Match the game's mantle edge finder (`DishonoredMantleEdgeFinderComponent`) more closely,
@@ -498,6 +653,9 @@ Next:
 4. SubUV flipbooks and original particle material scrolling/distortion; Blink's screen
    post-process material (`BlinkDistancePercentage` and the other parameters) instead of the approximate lens shader.
 5. A host adapter example: dropping `dis_motion` into another Rust game, in the mashup style.
+6. Sword polish: the contact system's impact sounds, sparks and blood, and the open questions in §5c.
+7. Drop assassination polish: the clips' blood lens effect (`DisEmitterCameraLensEffect_blood_medium`), real victims (a
+   guard mesh playing its `Generic_Assassination_Drop*_Slave` clip), and the open questions in §5b.
 
 ## 8. Credits
 
@@ -506,3 +664,5 @@ UELib / UE Explorer (Eliot van Uytfanghe), UE Viewer (Konstantin Nosov / Gildor)
 Runtime dependencies: [Bevy](https://bevyengine.org) and [glam](https://github.com/bitshifter/glam-rs) (MIT OR Apache-2.0).
 Structural references: [iw4L](https://github.com/vladtrc/iw4L), [gang-beasts-rust](https://github.com/muffinmxn/gang-beasts-rust),
 [benilla](https://github.com/samwhosung/benilla), [2010-rust-rewrite-mashup](https://github.com/chasmlol/2010-rust-rewrite-mashup).
+[dishonored-bevy](https://github.com/Eamo5/dishonored-bevy) (Eamo5) pointed us to the paired kill animations and their
+`anchor_jnt`. It has no licence, so it was consulted for facts only and no code from it is used.

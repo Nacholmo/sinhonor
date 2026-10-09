@@ -5,7 +5,10 @@ fn main() {
     let t = std::time::Instant::now();
     let data = dis_data::load(&install, Default::default()).expect("load");
     println!("loaded from {} in {:?}", install.display(), t.elapsed());
-    println!("{:#?}\n{:#?}", data.player, data.blink);
+    println!("{:#?}\n{:#?}\n{:#?}\n{:#?}", data.player, data.blink, data.drop_assassinate, data.melee);
+    for w in &data.warnings {
+        println!("warning: {w}");
+    }
     let mut anims: Vec<_> = data.anim_lengths.iter().filter(|(k, _)| k.contains("Mantle") || k.contains("Blink") || k.contains("Slide") || k.contains("Land") || k.contains("Jump")).collect();
     anims.sort_by(|a, b| a.0.cmp(b.0));
     println!("{} player anims; motion-related: {anims:?}", data.anim_lengths.len());

@@ -30,6 +30,15 @@ pub struct ParticleNotify {
     pub system: Arc<SystemDef>,
 }
 
+/// A sound an animation posts at a given time (`AnimNotify_AkEvent`).
+#[derive(Clone, Debug)]
+pub struct SoundNotify {
+    pub time: f32,
+    /// Wwise event name.
+    pub event: String,
+    pub volume: f32,
+}
+
 pub struct ViewModel {
     pub arms: MeshPart,
     pub sword: Option<MeshPart>,
@@ -42,6 +51,8 @@ pub struct ViewModel {
     pub sword_socket: Option<[i32; 3]>,
     /// Particle notifies by sequence name, sorted by time.
     pub particle_notifies: HashMap<String, Vec<ParticleNotify>>,
+    /// Sound notifies by sequence name, sorted by time.
+    pub sound_notifies: HashMap<String, Vec<SoundNotify>>,
     pub warnings: Vec<String>,
 }
 
@@ -150,6 +161,7 @@ pub fn load_viewmodel(install: &Path) -> Result<ViewModel, String> {
     };
     let mut anims = HashMap::new();
     let mut particle_notifies: HashMap<String, Vec<ParticleNotify>> = HashMap::new();
+    let mut sound_notifies: HashMap<String, Vec<SoundNotify>> = HashMap::new();
     let mut systems: HashMap<String, Option<Arc<SystemDef>>> = HashMap::new();
     let game_materials = Package::open(dir.join("DishonoredGame.upk")).ok();
     let loader = match Package::open(dir.join("Engine.upk")) {
@@ -166,6 +178,10 @@ pub fn load_viewmodel(install: &Path) -> Result<ViewModel, String> {
         let found = particle_notifies_of(&startup, &p, &loader, &mut systems, &mut warnings);
         if !found.is_empty() {
             particle_notifies.entry(name.clone()).or_insert(found);
+        }
+        let sounds = sound_notifies_of(&startup, &p);
+        if !sounds.is_empty() {
+            sound_notifies.entry(name.clone()).or_insert(sounds);
         }
         let d = startup.export_data(i);
         // RawAnimationData (empty when cooked), then CompressedByteStream.
@@ -203,7 +219,30 @@ pub fn load_viewmodel(install: &Path) -> Result<ViewModel, String> {
     if anims.is_empty() {
         warnings.push("no first-person animations decoded".into());
     }
-    Ok(ViewModel { arms, sword, skeleton, anims, sockets, sword_socket, particle_notifies, warnings })
+    Ok(ViewModel { arms, sword, skeleton, anims, sockets, sword_socket, particle_notifies, sound_notifies, warnings })
+}
+
+/// The `AnimNotify_AkEvent`s in a sequence's `Notifies`.
+fn sound_notifies_of(pkg: &Package, seq: &[upk::Property]) -> Vec<SoundNotify> {
+    let Some(Value::Array { count, raw }) = lookup(seq, "Notifies") else { return Vec::new() };
+    let Ok(events) = pkg.struct_array(*count, raw) else { return Vec::new() };
+    let mut out = Vec::new();
+    for ev in events {
+        let Some(Value::Object(n)) = lookup(&ev, "Notify") else { continue };
+        let ObjRef::Export(ni) = ObjRef::from_index(*n) else { continue };
+        if pkg.export_class_name(ni) != "AnimNotify_AkEvent" {
+            continue;
+        }
+        let Ok(np) = pkg.properties(ni) else { continue };
+        let Some(Value::Object(e)) = lookup(&np, "AkEvent").filter(|v| !matches!(v, Value::Object(0))) else { continue };
+        let path = pkg.object_path(ObjRef::from_index(*e));
+        let Some(event) = path.rsplit('.').next().map(str::to_string) else { continue };
+        let time = lookup(&ev, "Time").and_then(Value::as_f32).unwrap_or(0.0);
+        let volume = lookup(&np, "VolumeMultiplier").and_then(Value::as_f32).unwrap_or(1.0);
+        out.push(SoundNotify { time, event, volume });
+    }
+    out.sort_by(|a, b| a.time.total_cmp(&b.time));
+    out
 }
 
 /// The `AnimNotify_PlayParticleEffect`s in a sequence's `Notifies` (time, notify object, ...).

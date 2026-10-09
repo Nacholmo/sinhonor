@@ -10,7 +10,6 @@ pub enum Kind {
     Ledge,
     Stairs,
     Roof,
-    Guard,
     Ladder,
     Water,
     Gravel,
@@ -22,9 +21,19 @@ pub struct Piece {
     pub kind: Kind,
 }
 
+/// A dummy guard: a box character that Blink stops at and that can be dropped on.
+pub struct Guard {
+    pub actor: u32,
+    pub center: Vec3,
+    pub half: Vec3,
+    /// Facing (Unreal yaw, radians).
+    pub yaw: f32,
+}
+
 pub struct Level {
     pub world: BoxWorld,
     pub pieces: Vec<Piece>,
+    pub guards: Vec<Guard>,
     pub spawn: Vec3,
     pub spawn_yaw: f32,
 }
@@ -37,8 +46,9 @@ impl Level {
     }
 }
 
-pub fn build() -> Level {
-    let mut l = Level { world: BoxWorld::default(), pieces: Vec::new(), spawn: Vec3::new(0.0, 0.0, 0.0), spawn_yaw: 0.0 };
+/// `guard_health` is a dummy guard's starting health (the game's default for a character).
+pub fn build(guard_health: f32) -> Level {
+    let mut l = Level { world: BoxWorld::default(), pieces: Vec::new(), guards: Vec::new(), spawn: Vec3::new(0.0, 0.0, 0.0), spawn_yaw: 0.0 };
 
     // Ground with a hole for the pool at x -2600..-1400, y -2600..-1400.
     let (px0, px1, py0, py1) = (-2600.0, -1400.0, -2600.0, -1400.0);
@@ -101,11 +111,16 @@ pub fn build() -> Level {
     // A high perch only reachable by blinking upward.
     l.solid([4600.0, 900.0, 0.0], [4900.0, 1200.0, 1100.0], Kind::Roof);
 
-    // Dummy guards to blink into (Blink stops at pawns).
-    for (i, p) in [Vec3::new(1800.0, 600.0, 88.0), Vec3::new(2000.0, -700.0, 88.0)].into_iter().enumerate() {
+    // Dummy guards. Blink stops at them, the sword hurts them, and dropping onto one and attacking kills it:
+    // 1 and 2 stand in the open (blink up above them, then fall), 3 stands with its back to the
+    // balcony (walk off the edge), 4 keeps watch below the first rooftop (walk off and dive from 6 m).
+    use std::f32::consts::{FRAC_PI_2, PI};
+    for (i, (x, y, yaw)) in [(1800.0, 600.0, PI), (2000.0, -700.0, FRAC_PI_2), (860.0, 1500.0, 0.0), (3080.0, 0.0, FRAC_PI_2)].into_iter().enumerate() {
         let half = Vec3::new(31.0, 31.0, 87.5);
-        l.world.add_pawn(p, half, i as u32 + 1);
-        l.pieces.push(Piece { min: p - half, max: p + half, kind: Kind::Guard });
+        let center = Vec3::new(x, y, half.z);
+        let actor = i as u32 + 1;
+        l.world.add_character(center, half, actor, yaw, guard_health);
+        l.guards.push(Guard { actor, center, half, yaw });
     }
     l
 }

@@ -7,20 +7,25 @@
 //! so tuning read from the game applies unchanged; hosts convert at the boundary.
 //!
 //! Behaviour sources are documented in `NOTES.md`: Blink follows the behaviour specified in
-//! §5; walking/falling follow UE3's character physics fed with Dishonored's tuning; mantle,
-//! slide, lean, swim and ladder are modelled from the game's tuning and animation timings.
+//! §5, the drop assassination the one in §5b and the sword attack the one in §5c; walking/falling follow UE3's character physics
+//! fed with Dishonored's tuning; mantle, slide, lean, swim and ladder are modelled from the
+//! game's tuning and animation timings.
 
 mod blink;
 pub mod boxworld;
 mod camera;
 mod collide;
 mod controller;
+mod melee;
+mod takedown;
 mod tuning;
 
 pub use blink::{Blink, BlinkEvent, BlinkFx, BlinkMode, BlinkTarget};
 pub use camera::CameraFeel;
 pub use controller::{Input, MantleKind, Motion, MotionState, StepEvents};
 pub use glam::{Vec2, Vec3};
+pub use melee::{Melee, MeleeEvent, MeleeTuning, SwingAnim, SwingKind, SwingRun, SwingSet, CROSSHAIR_HALF_HEIGHT, SWEEP_HALF_HEIGHT};
+pub use takedown::{landing, side_of, DropAssassinateTuning, DropSide, PawnInfo, Reach, Side, Takedown, TakedownRun, DIVE_SPEED_SCALE};
 pub use tuning::*;
 
 /// Result of a swept box query.
@@ -79,6 +84,12 @@ pub trait World {
     /// True if Blink may not end inside this point (the game's blink-blocking volumes).
     fn blink_blocked(&self, _point: Vec3) -> bool {
         false
+    }
+
+    /// The character a pawn hit reported as `actor`, if it can be fought or taken down (alive,
+    /// not ragdolled). Without it, drop assassinations find no one and no blow is a killing blow.
+    fn pawn(&self, _actor: u32) -> Option<PawnInfo> {
+        None
     }
 }
 

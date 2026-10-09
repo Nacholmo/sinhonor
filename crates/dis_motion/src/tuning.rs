@@ -1,6 +1,8 @@
 //! Tuning consumed by the motion core. Filled from the game install by the `dishonored-data`
 //! feature ([`MotionTuning::from_game`]) or by the host from any other source.
 
+use crate::{DropAssassinateTuning, MeleeTuning};
+
 #[derive(Clone, Debug)]
 pub struct MotionTuning {
     pub gravity_z: f32,
@@ -52,6 +54,8 @@ pub struct MotionTuning {
     pub mantle_blink: MantleTuning,
     pub anim: AnimTimes,
     pub blink: BlinkTuning,
+    pub drop_assassinate: DropAssassinateTuning,
+    pub melee: MeleeTuning,
 }
 
 #[derive(Clone, Debug)]
@@ -251,6 +255,45 @@ impl MotionTuning {
                 close_collision_distance: g.blink.close_collision_distance,
                 close_collision_offset_step: g.blink.close_collision_offset_step,
                 limit_vertical_from_ground: g.blink.limit_vertical_from_ground,
+            },
+            drop_assassinate: {
+                let d = &g.drop_assassinate;
+                DropAssassinateTuning {
+                    hit_window: d.hit_window,
+                    min_drop_dist: d.min_drop_dist,
+                    max_drop_dist: d.max_drop_dist,
+                    max_drop_jump_vel: d.max_drop_jump_vel,
+                    min_drop_down_vel: d.min_drop_down_vel,
+                    sides: std::array::from_fn(|i| crate::DropSide { anchor: crate::Vec3::from(d.sides[i].anchor), duration: d.sides[i].duration }),
+                }
+            },
+            melee: {
+                let m = &g.melee;
+                let anim = |a: &dis_data::melee::SwingAnim| crate::SwingAnim {
+                    name: a.name.clone(),
+                    zone: a.zone,
+                    chain_input: a.chain_input,
+                    interruptible: a.interruptible,
+                    exit: a.exit,
+                };
+                MeleeTuning {
+                    range: m.range,
+                    ray_scale_percent: m.ray_scale_percent,
+                    ray_speed_scale: m.ray_speed_scale,
+                    ray_speed_scale_max: m.ray_speed_scale_max,
+                    min_speed_ray_scale: m.min_speed_ray_scale,
+                    sweep_size: m.sweep_size,
+                    crosshair_size: m.crosshair_size,
+                    chain_time: m.chain_time,
+                    damage: m.damage,
+                    env_hit_shake: m.env_hit_shake,
+                    swings: std::array::from_fn(|i| {
+                        m.swings[i]
+                            .iter()
+                            .map(|s| crate::SwingSet { swing: anim(&s.swing), env_hit: s.env_hit.as_ref().map(anim), env_hit_chain: s.env_hit_chain.as_ref().map(anim) })
+                            .collect()
+                    }),
+                }
             },
         }
     }

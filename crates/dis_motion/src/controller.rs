@@ -1,10 +1,12 @@
 //! The player movement state machine: walk/run/sprint/crouch, jump and fall with air control,
-//! slide, mantle (ledge finder), lean, swim, ladder, and Blink travel.
+//! slide, mantle (ledge finder), lean, swim, ladder, Blink travel and the drop assassination.
 
 use crate::blink::{BlinkEvent, PawnView};
 use crate::camera::{CameraFeel, CameraInput};
 use crate::collide::{find_floor, move_slide, step_up, SKIN};
-use crate::{yaw_axes, Blink, MantleTuning, MotionTuning, Vec2, Vec3, World};
+use crate::melee::{Melee, MeleeEvent, Swordsman};
+use crate::takedown::{self, Faller, Reach, Takedown, TakedownRun, DIVE_SPEED_SCALE};
+use crate::{yaw_axes, Blink, MantleTuning, MotionTuning, Side, Vec2, Vec3, World};
 
 /// Longest physics substep; larger frames are split.
 const MAX_SUBSTEP: f32 = 1.0 / 90.0;
@@ -20,6 +22,8 @@ pub enum MotionState {
     Swimming,
     Ladder,
     Blinking,
+    /// A drop assassination: the player is held while the kill plays.
+    Takedown,
 }
 
 /// One frame of player intent. `look` is the frame's yaw/pitch delta in radians.
@@ -38,6 +42,8 @@ pub struct Input {
     pub lean: f32,
     /// Blink power button (hold to aim, release to go).
     pub blink: bool,
+    /// Attack button: a sword swing, or a drop assassination while falling onto someone.
+    pub attack: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -56,6 +62,12 @@ pub struct StepEvents {
     pub mantled: Option<MantleKind>,
     pub slid: bool,
     pub blink: Vec<BlinkEvent>,
+    /// Locked on to a drop-assassination target that is still too far below, and diving.
+    pub dove_at: Option<u32>,
+    /// A drop assassination started: the target (now dead) and the side it was taken from.
+    pub drop_assassination: Option<(u32, Side)>,
+    /// Sword swings, hits and recoils.
+    pub melee: Vec<MeleeEvent>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -96,6 +108,8 @@ pub struct Motion {
     pub camera: CameraFeel,
     pub floor_normal: Option<Vec3>,
     pub last_mantle: Option<MantleKind>,
+    pub takedown: Takedown,
+    pub melee: Melee,
     crouch_wanted: bool,
     auto_crouched: bool,
     prev: Input,
@@ -121,6 +135,8 @@ impl Motion {
             camera: CameraFeel::default(),
             floor_normal: None,
             last_mantle: None,
+            takedown: Takedown::default(),
+            melee: Melee::default(),
             crouch_wanted: false,
             auto_crouched: false,
             prev: Input::default(),
@@ -168,8 +184,11 @@ impl Motion {
     pub fn update(&mut self, world: &dyn World, input: &Input, dt: f32) -> StepEvents {
         let mut ev = StepEvents::default();
         let t = &self.tuning;
-        self.yaw = (self.yaw + input.look.x).rem_euclid(std::f32::consts::TAU);
-        self.pitch = (self.pitch + input.look.y).clamp(t.min_pitch_deg.to_radians(), t.max_pitch_deg.to_radians());
+        // The kill animation owns the view.
+        if self.state != MotionState::Takedown {
+            self.yaw = (self.yaw + input.look.x).rem_euclid(std::f32::consts::TAU);
+            self.pitch = (self.pitch + input.look.y).clamp(t.min_pitch_deg.to_radians(), t.max_pitch_deg.to_radians());
+        }
 
         let steps = (dt / MAX_SUBSTEP).ceil().clamp(1.0, 8.0) as usize;
         let h = dt / steps as f32;
@@ -179,6 +198,13 @@ impl Motion {
             self.substep(world, input, &edge, h, &mut ev);
         }
         self.prev = *input;
+        let me = self.swordsman();
+        self.melee.target = Melee::crosshair(&self.tuning.melee, world, &me);
+        self.takedown.prompt = match self.takedown.diving {
+            Some(target) => takedown::check(world, &self.tuning.drop_assassinate, &self.faller(), target).map(|r| (target, r)),
+            None if self.state == MotionState::Falling => takedown::search(world, &self.tuning.drop_assassinate, &self.faller()),
+            None => None,
+        };
 
         let feet_z = self.feet().z;
         let leaning = if self.state == MotionState::Walking && self.speed_2d() < 50.0 { input.lean } else { 0.0 };
@@ -188,7 +214,7 @@ impl Motion {
             yaw: self.yaw,
             speed_2d: self.speed_2d(),
             run_speed: self.tuning.run_speed,
-            grounded: matches!(self.state, MotionState::Walking | MotionState::Sliding),
+            grounded: matches!(self.state, MotionState::Walking | MotionState::Sliding | MotionState::Takedown),
             lean_axis: leaning,
             crouched: self.crouched,
             feet_z,
@@ -205,7 +231,7 @@ impl Motion {
     fn substep(&mut self, world: &dyn World, input: &Input, prev: &Input, dt: f32, ev: &mut StepEvents) {
         // --- Blink runs alongside every state; travelling takes over movement. ---
         let half = self.half();
-        let can_blink = !matches!(self.state, MotionState::Mantling);
+        let can_blink = !matches!(self.state, MotionState::Mantling | MotionState::Takedown) && self.takedown.diving.is_none();
         let mut pawn = PawnView {
             pos: self.pos,
             half,
@@ -246,6 +272,26 @@ impl Motion {
         if self.state == MotionState::Blinking {
             return;
         }
+        if self.state == MotionState::Takedown {
+            self.takedown_tick(world, dt);
+            return;
+        }
+        if self.state == MotionState::Falling && self.drop_attack(world, input, prev, ev) {
+            self.melee.run = None;
+            return;
+        }
+        // The sword: alongside walking, falling and sliding. An attack press that locked on to a
+        // drop-assassination target is not also a swing.
+        let can_fight = matches!(self.state, MotionState::Walking | MotionState::Falling | MotionState::Sliding) && self.takedown.diving.is_none();
+        let swing_pressed = Self::pressed(input.attack, prev.attack) && ev.dove_at.is_none();
+        let me = Swordsman { attack: swing_pressed, can_fight, ..self.swordsman() };
+        self.melee.tick(&self.tuning.melee, world, &me, dt, &mut ev.melee);
+        if self.takedown.diving.is_some() && self.state != MotionState::Falling {
+            self.takedown.diving = None;
+        }
+        // Locked on to a target: no steering, crouching or ledge grabs on the way down.
+        let input = &if self.takedown.diving.is_some() { Input { look: input.look, ..Input::default() } } else { *input };
+        let prev = &if self.takedown.diving.is_some() { Input::default() } else { *prev };
 
         // --- Crouch toggle ---
         if Self::pressed(input.crouch, prev.crouch) && self.state != MotionState::Sliding {
@@ -269,7 +315,7 @@ impl Motion {
             MotionState::Mantling => self.mantle_tick(dt),
             MotionState::Swimming => self.swim(world, input, prev, dt, ev),
             MotionState::Ladder => self.ladder(world, input, prev, dt, ev),
-            MotionState::Blinking => {}
+            MotionState::Blinking | MotionState::Takedown => {}
         }
 
         // Enter water from any surface state.
@@ -585,6 +631,8 @@ impl Motion {
         while h <= m.max_edge_height + m.line_check_step {
             let s = Vec3::new(self.pos.x, self.pos.y, feet + h);
             match world.sweep(s, s + fwd * reach, tiny) {
+                // Characters are not ledges.
+                Some(hit) if hit.is_pawn => return None,
                 Some(hit) if !hit.start_penetrating && hit.normal.z.abs() <= max_face_z && (-fwd).dot(hit.normal.with_z(0.0).normalize_or_zero()) >= max_face_h => {
                     wall = Some(hit);
                 }
@@ -612,7 +660,7 @@ impl Motion {
         let top_start = Vec3::new(over.x, over.y, feet + m.max_edge_height + 2.0);
         let top_end = Vec3::new(over.x, over.y, feet + m.min_edge_height.min(h) - 2.0);
         let top = world.sweep(top_start, top_end, tiny)?;
-        if top.start_penetrating || top.normal.z < m.max_slope_angle_edge_top_deg.to_radians().cos() {
+        if top.start_penetrating || top.is_pawn || top.normal.z < m.max_slope_angle_edge_top_deg.to_radians().cos() {
             return None;
         }
         let surface_z = top.location.z - tiny.z;
@@ -731,6 +779,95 @@ impl Motion {
             MotionState::Falling
         };
         self.fall_peak_speed = 0.0;
+    }
+
+    // ----------------------------------------------------------------- drop assassination
+
+    fn swordsman(&self) -> Swordsman {
+        // Before the first camera update the eye isn't placed yet.
+        let eye = if self.camera.eye == Vec3::ZERO { self.pos + Vec3::Z * self.eye_height_for(self.crouched) } else { self.camera.eye };
+        Swordsman { eye, aim: self.view_dir(), velocity: self.vel, crouched: self.crouched, attack: false, can_fight: true }
+    }
+
+    fn faller(&self) -> Faller {
+        Faller { pos: self.pos, half: self.half(), feet_z: self.feet().z, vel: self.vel, gravity_z: self.tuning.gravity_z }
+    }
+
+    /// While falling: follows a locked-on target, or answers an attack press. True if a kill started.
+    fn drop_attack(&mut self, world: &dyn World, input: &Input, prev: &Input, ev: &mut StepEvents) -> bool {
+        let t = self.tuning.drop_assassinate.clone();
+        let me = self.faller();
+        if let Some(target) = self.takedown.diving {
+            match takedown::check(world, &t, &me, target) {
+                Some(Reach::InRange) => return self.start_drop_kill(world, target, ev),
+                Some(Reach::Track) => {}
+                None => self.takedown.diving = None,
+            }
+            return false;
+        }
+        if !Self::pressed(input.attack, prev.attack) {
+            return false;
+        }
+        match takedown::search(world, &t, &me) {
+            Some((target, Reach::InRange)) => self.start_drop_kill(world, target, ev),
+            Some((target, Reach::Track)) => {
+                // Lock on: stop drifting and plunge straight down.
+                self.takedown.diving = Some(target);
+                self.vel = Vec3::new(0.0, 0.0, self.vel.z.min(0.0) * DIVE_SPEED_SCALE);
+                ev.dove_at = Some(target);
+                false
+            }
+            None => false,
+        }
+    }
+
+    /// Moves the player to the target's side for the kill (the target's animation places them),
+    /// standing and facing it.
+    fn start_drop_kill(&mut self, world: &dyn World, target: u32, ev: &mut StepEvents) -> bool {
+        let Some(info) = world.pawn(target) else { return false };
+        let side = takedown::side_of(&info, self.pos);
+        let s = self.tuning.drop_assassinate.sides[side.index()];
+        let (feet, yaw) = takedown::landing(&info, &s);
+        let from_eye = self.camera.eye;
+        let half = Self::half_for(&self.tuning, false);
+        let dest = feet + Vec3::Z * (half.z + SKIN);
+        // Don't end up inside walls: stop where the way there is blocked (the target itself is
+        // about to fall away, so it doesn't count).
+        let pos = match world.sweep(self.pos, dest, half) {
+            Some(h) if !(h.is_pawn && h.actor == target) && !h.start_penetrating => h.location,
+            _ => dest,
+        };
+        self.pos = pos;
+        self.crouched = false;
+        self.crouch_wanted = false;
+        self.auto_crouched = false;
+        self.vel = Vec3::ZERO;
+        self.yaw = yaw.rem_euclid(std::f32::consts::TAU);
+        self.pitch = 0.0;
+        self.fall_peak_speed = 0.0;
+        self.state = MotionState::Takedown;
+        self.takedown.diving = None;
+        self.takedown.run = Some(TakedownRun { target, side, t: 0.0, duration: s.duration, from_eye });
+        ev.drop_assassination = Some((target, side));
+        true
+    }
+
+    fn takedown_tick(&mut self, world: &dyn World, dt: f32) {
+        let Some(run) = self.takedown.run.as_mut() else {
+            self.state = MotionState::Falling;
+            return;
+        };
+        run.t += dt;
+        self.vel = Vec3::ZERO;
+        if run.t >= run.duration {
+            self.takedown.run = None;
+            let half = self.half();
+            self.state = if find_floor(world, self.pos, half, FLOOR_SNAP, self.tuning.walkable_floor_z).is_some() {
+                MotionState::Walking
+            } else {
+                MotionState::Falling
+            };
+        }
     }
 
     // ----------------------------------------------------------------- swim

@@ -7,8 +7,10 @@
 
 pub mod ini;
 pub mod effects;
+pub mod melee;
 pub mod sounds;
 pub mod surfaces;
+pub mod takedown;
 pub mod viewmodel;
 
 use ini::Ini;
@@ -172,6 +174,8 @@ pub struct GameData {
     pub difficulty: Difficulty,
     pub player: PlayerTuning,
     pub blink: BlinkTuning,
+    pub drop_assassinate: takedown::DropAssassinateTuning,
+    pub melee: melee::MeleeTuning,
     /// Player animation lengths in seconds (`SequenceLength / RateScale`), keyed by sequence name,
     /// from the first-person `Ply_*` AnimSets in `Startup.upk`.
     pub anim_lengths: std::collections::HashMap<String, f32>,
@@ -525,7 +529,10 @@ pub fn load(install: &Path, difficulty: Difficulty) -> Result<GameData, Error> {
         cx.warnings.push("no player animations found in Startup.upk".into());
     }
 
-    Ok(GameData { install: install.to_path_buf(), difficulty, player, blink, anim_lengths, warnings: cx.warnings })
+    let drop_assassinate = takedown::load(&mut cx, install, &startup, &game, &anim_lengths);
+    let melee = melee::load(&mut cx, &startup, &game, &ppawn, difficulty);
+
+    Ok(GameData { install: install.to_path_buf(), difficulty, player, blink, drop_assassinate, melee, anim_lengths, warnings: cx.warnings })
 }
 
 /// Parses `(m_Springiness=80.0,m_Damping=12.0)`.
