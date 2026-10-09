@@ -1,7 +1,7 @@
 //! Tuning consumed by the motion core. Filled from the game install by the `dishonored-data`
 //! feature ([`MotionTuning::from_game`]) or by the host from any other source.
 
-use crate::{AssassinateTuning, DropAssassinateTuning, MeleeTuning};
+use crate::{AssassinateTuning, DropAssassinateTuning, MeleeTuning, Vec3};
 
 #[derive(Clone, Debug)]
 pub struct MotionTuning {
@@ -126,15 +126,22 @@ pub struct MantleTuning {
     pub anim_rate: f32,
 }
 
+/// How a mantle animation moves the player (`NOTES.md` §5f).
+#[derive(Clone, Debug, Default)]
+pub struct MantleClip {
+    /// When the mantle ends (seconds, before the mantle animation rate).
+    pub exit: f32,
+    /// The animation root's path: (seconds, rise, forward). The rise is scaled to the edge height;
+    /// with no forward travel the player moves over the edge by the finder's forward step. Empty:
+    /// a straight rise over `exit`.
+    pub root: Vec<Vec3>,
+}
+
 /// Durations (seconds) of the first-person animations that pace motion.
 #[derive(Clone, Debug)]
 pub struct AnimTimes {
-    pub mantle_low: f32,
-    pub mantle_medium: f32,
-    pub mantle_high: f32,
-    pub crouch_mantle_low: f32,
-    pub crouch_mantle_medium: f32,
-    pub crouch_mantle_high: f32,
+    /// Low, medium and high mantles, then the crouched ones.
+    pub mantle: [MantleClip; 6],
     pub land_small: f32,
     pub land_big: f32,
     pub slide_in: f32,
@@ -261,12 +268,10 @@ impl MotionTuning {
             mantle: mantle(&p.mantle),
             mantle_blink: mantle(&p.mantle_blink),
             anim: AnimTimes {
-                mantle_low: anim("Empty_MantleLow", 0.6),
-                mantle_medium: anim("Empty_MantleMedium", 0.7),
-                mantle_high: anim("Empty_MantleHigh", 1.0),
-                crouch_mantle_low: anim("Empty_CrouchMantleLow", 0.6),
-                crouch_mantle_medium: anim("Empty_CrouchMantleMedium", 0.7),
-                crouch_mantle_high: anim("Empty_CrouchMantleHigh", 1.0),
+                mantle: std::array::from_fn(|i| {
+                    let c = &g.mantle_clips[i];
+                    MantleClip { exit: c.exit, root: c.root.iter().map(|r| Vec3::from(*r)).collect() }
+                }),
                 land_small: anim("Empty_JumpLandSmall", 0.5) / p.land_anim_rate.max(0.01),
                 land_big: anim("Generic_JumpLandBig", 1.0) / p.land_anim_rate.max(0.01),
                 slide_in: anim("Empty_SlideIn", 0.3),

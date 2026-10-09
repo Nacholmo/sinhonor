@@ -126,7 +126,9 @@ impl BoxWorld {
             return Some((0.0, best.1, true));
         }
         let d = end - start;
-        let mut t_enter = 0.0f32;
+        // Starting against a face counts as entering it at once (a sweep into a wall it touches
+        // hits at time 0).
+        let mut t_enter = -f32::INFINITY;
         let mut t_exit = 1.0f32;
         let mut normal = Vec3::ZERO;
         for i in 0..3 {
@@ -152,10 +154,10 @@ impl BoxWorld {
                 return None;
             }
         }
-        if normal == Vec3::ZERO || t_enter > 1.0 {
+        if normal == Vec3::ZERO || t_enter > 1.0 || t_enter < -EPS / d.length().max(1e-6) {
             return None;
         }
-        Some((t_enter, normal, false))
+        Some((t_enter.max(0.0), normal, false))
     }
 }
 

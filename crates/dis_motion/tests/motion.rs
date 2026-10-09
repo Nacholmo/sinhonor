@@ -2,6 +2,12 @@
 use dis_motion::boxworld::BoxWorld;
 use dis_motion::*;
 
+/// A made-up mantle clip: rises over the first two thirds, moves forward (if `forward`) after.
+fn mantle_clip(exit: f32, forward: bool) -> MantleClip {
+    let f = if forward { 30.0 } else { 0.0 };
+    MantleClip { exit, root: vec![Vec3::ZERO, Vec3::new(exit / 3.0, 6.0, 0.0), Vec3::new(exit * 2.0 / 3.0, 10.0, f * 0.5), Vec3::new(exit, 10.0, f)] }
+}
+
 fn tuning() -> MotionTuning {
     let mantle = MantleTuning {
         line_check_step: 10.0,
@@ -65,7 +71,13 @@ fn tuning() -> MotionTuning {
         swim: SwimTuning { min_accel: 500.0, max_accel: 2000.0, max_speed_no_stroke: 300.0, stroke_time: 0.3 },
         mantle_blink: mantle.clone(),
         mantle,
-        anim: AnimTimes { mantle_low: 0.6, mantle_medium: 0.7, mantle_high: 1.0, crouch_mantle_low: 0.6, crouch_mantle_medium: 0.7, crouch_mantle_high: 1.0, land_small: 0.5, land_big: 1.0, slide_in: 0.3, slide_out: 0.3 },
+        anim: AnimTimes {
+            mantle: std::array::from_fn(|i| mantle_clip(0.5 + 0.1 * (i % 3) as f32, i < 3)),
+            land_small: 0.5,
+            land_big: 1.0,
+            slide_in: 0.3,
+            slide_out: 0.3,
+        },
         blink: BlinkTuning {
             levels: vec![BlinkLevel {
                 distance: 1500.0,
@@ -681,4 +693,85 @@ fn assassination_is_plain_when_the_world_is_in_the_way() {
     assert!(a.generic);
     assert_eq!(a.victim_feet, Vec3::new(0.0, 0.0, 0.0));
     assert_eq!(m.takedown.run.as_ref().map(|r| r.anim.as_str()), Some("Generic"));
+}
+
+/// A floor with a wall of the given height across +X at x = 100.
+fn wall_world(height: f32) -> BoxWorld {
+    let mut w = floor_world();
+    w.add_box(Vec3::new(100.0, -500.0, 0.0), Vec3::new(500.0, 500.0, height));
+    w
+}
+
+/// Faces `yaw`, walks into the wall and presses jump; returns the events of the press.
+fn mantle_at(w: &BoxWorld, yaw: f32, crouched: bool) -> (Motion, Vec<StepEvents>) {
+    let mut m = Motion::new(tuning(), Vec3::ZERO, yaw);
+    run(&mut m, w, Input::default(), 0.3);
+    if crouched {
+        run(&mut m, w, Input { crouch: true, ..Default::default() }, 0.02);
+        run(&mut m, w, Input::default(), 0.1);
+    }
+    run(&mut m, w, fwd(), 0.6);
+    let evs = run(&mut m, w, Input { jump: true, ..fwd() }, 0.02);
+    (m, evs)
+}
+
+#[test]
+fn low_edges_step_up_at_once_and_higher_ones_climb() {
+    // Low: stepped up the same frame, no climb.
+    let w = wall_world(90.0);
+    let (m, evs) = mantle_at(&w, 0.0, false);
+    assert_eq!(evs.iter().find_map(|e| e.mantled), Some(MantleKind::Low));
+    assert_eq!(m.state, MotionState::Walking);
+    assert!(m.feet().z >= 90.0 && m.feet().z < 101.0, "stepped up to {}", m.feet().z);
+    assert!(m.pos.x > 85.0, "over the edge, x {}", m.pos.x);
+
+    // High, approached at an angle: the climb turns the player to face the edge.
+    let w = wall_world(190.0);
+    let (mut m, evs) = mantle_at(&w, 0.5, false);
+    assert_eq!(evs.iter().find_map(|e| e.mantled), Some(MantleKind::High));
+    assert_eq!(m.state, MotionState::Mantling);
+    run(&mut m, &w, Input::default(), 1.0);
+    assert_eq!(m.state, MotionState::Walking);
+    assert!((m.feet().z - 190.0).abs() < 2.0, "on top, feet {}", m.feet().z);
+    assert!(m.yaw.min(std::f32::consts::TAU - m.yaw) < 0.05, "faces the edge, yaw {}", m.yaw);
+}
+
+#[test]
+fn mantle_needs_a_facing_wall_and_crouches_under_a_low_roof() {
+    // Too sideways to the wall: no mantle.
+    let w = wall_world(140.0);
+    let (_, evs) = mantle_at(&w, 1.0, false);
+    assert!(evs.iter().all(|e| e.mantled.is_none()), "no mantle at a glancing angle");
+
+    // A roof over the top leaves only crouching room: a crouched player finds the edge, and
+    // stays crouched on top.
+    let mut w = wall_world(120.0);
+    w.add_box(Vec3::new(100.0, -500.0, 220.0), Vec3::new(500.0, 500.0, 300.0));
+    let (mut m, evs) = mantle_at(&w, 0.0, true);
+    assert_eq!(evs.iter().find_map(|e| e.mantled), Some(MantleKind::Medium));
+    run(&mut m, &w, Input::default(), 1.0);
+    assert!(m.crouched && m.state == MotionState::Walking, "crouched on top: {:?} {}", m.state, m.crouched);
+    assert!((m.feet().z - 120.0).abs() < 2.0, "on top, feet {}", m.feet().z);
+}
+
+#[test]
+fn falling_fast_catches_edges_only_once_well_past_them() {
+    // Falls past the top of a tall wall, holding forward; returns how far the edge was above the
+    // feet when it was caught, and whether it was a hard catch.
+    let fall = |speed: f32| {
+        let w = wall_world(400.0);
+        let mut m = Motion::new(tuning(), Vec3::new(69.0, 0.0, 420.0), 0.0);
+        m.vel = Vec3::new(0.0, 0.0, -speed);
+        for _ in 0..60 {
+            let e = m.update(&w, &fwd(), 1.0 / 60.0);
+            if e.mantled.is_some() {
+                return Some((400.0 - m.feet().z, e.mantle_impact));
+            }
+        }
+        None
+    };
+    let (slow, impact) = fall(300.0).expect("caught falling slowly");
+    assert!(!impact && slow < 70.0, "slow: edge {slow} above the feet");
+    let (fast, impact) = fall(1200.0).expect("caught falling fast");
+    assert!(impact && fast >= 140.0, "fast: edge {fast} above the feet");
 }

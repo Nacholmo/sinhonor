@@ -6,6 +6,7 @@
 //! See `NOTES.md` for where each value lives and how it was identified.
 
 pub mod ini;
+pub mod mantle;
 pub mod effects;
 pub mod melee;
 pub mod powers;
@@ -201,6 +202,8 @@ pub struct GameData {
     pub drop_assassinate: takedown::DropAssassinateTuning,
     pub assassinate: takedown::AssassinateTuning,
     pub melee: melee::MeleeTuning,
+    /// How the mantle clips move the player ([`mantle::CLIPS`] order).
+    pub mantle_clips: [mantle::MantleClip; 6],
     /// Passive powers and their levels (Agility is [`powers::AGILITY`]).
     pub powers: Vec<powers::Power>,
     /// Player animation lengths in seconds (`SequenceLength / RateScale`), keyed by sequence name,
@@ -439,7 +442,8 @@ pub fn load(install: &Path, difficulty: Difficulty) -> Result<GameData, Error> {
         let gb = |k: &str| bval(m, k).or_else(|| bval(fallback, k));
         MantleTuning {
             line_check_step: cx.f(&format!("{tag}.m_LineCheckStepSize"), g("m_LineCheckStepSize"), 10.0),
-            min_edge_height: cx.f(&format!("{tag}.m_MantleMinEdgeHeight"), g("m_MantleMinEdgeHeight"), 50.0),
+            // Not taken from the fallback: the Blink ledge finder's tweaks all leave it out, so it is 0.
+            min_edge_height: fval(m, "m_MantleMinEdgeHeight").unwrap_or(0.0),
             max_edge_height: cx.f(&format!("{tag}.m_MantleMaxEdgeHeight"), g("m_MantleMaxEdgeHeight"), 200.0),
             low_max_edge_height: cx.f(&format!("{tag}.m_LowMantleMaxEdgeHeight"), g("m_LowMantleMaxEdgeHeight"), 100.0),
             medium_max_edge_height: cx.f(&format!("{tag}.m_MediumMantleMaxEdgeHeight"), g("m_MediumMantleMaxEdgeHeight"), 150.0),
@@ -634,12 +638,13 @@ pub fn load(install: &Path, difficulty: Difficulty) -> Result<GameData, Error> {
     let (drop_assassinate, assassinate) = takedown::load(&mut cx, install, &startup, &game);
     let melee = melee::load(&mut cx, &startup, &game, &ppawn, difficulty);
 
+    let mantle_clips = mantle::load(&mut cx, &engine, &startup);
     let powers = powers::parse_powers(cfg.all("DishonoredGame.DishonoredPowersComponent", "m_Powers"));
     if !powers.iter().any(|p| p.name == powers::AGILITY) {
         cx.warnings.push("Agility (Celerity) not found in DefaultPlayer.ini".into());
     }
 
-    Ok(GameData { install: install.to_path_buf(), difficulty, player, blink, drop_assassinate, assassinate, melee, powers, anim_lengths, warnings: cx.warnings })
+    Ok(GameData { install: install.to_path_buf(), difficulty, player, blink, drop_assassinate, assassinate, melee, mantle_clips, powers, anim_lengths, warnings: cx.warnings })
 }
 
 /// Parses `(m_Springiness=80.0,m_Damping=12.0)`.

@@ -262,7 +262,6 @@ Parameter names the materials read: `BlinkDistancePercentage`, `BlinkStepProgres
 - Which of the 3 `m_Levels` slots each Blink tier uses. For the passive powers (§5e) the slot is the owned level and only that
   level's modifiers apply; Blink's own tweak levels are likely chosen the same way.
 - The exact sideways axes used by the close-collision nudge (world Y versus aim-relative).
-- The ledge detector (step-up mantle and full mantle) belongs to the movement work below.
 
 ## 5b. Drop assassination: behaviour specification (2026-10-09)
 
@@ -520,6 +519,82 @@ the jump state, which ends at the top of the jump (upward speed at or below 0.00
 - Whether the power jump also triggers controller rumble or a camera effect (there's no FOV change in the shipped
   settings), and whether jumping while carrying a body or from a moving base changes it.
 
+## 5f. Mantle edge finder and mantle: behaviour specification (2026-10-09)
+
+How the game finds an edge to climb and moves the player onto it. This is the behaviour `crates/dis_motion` implements
+(`controller.rs`, `find_mantle_spot` and the mantle), written as a specification in our own words. Values are read at
+runtime.
+
+### Data used at runtime
+
+- **The finder's tweak**, `DisTweaks_PlayerPawn_Mantle`: `m_pMantleTweaks`, and `m_pMantleBlinkTweaks` for the separate
+  finder used right after a blink. Fields: `m_LineCheckStepSize`, `m_MantleMinEdgeHeight`, `m_MantleMaxEdgeHeight`,
+  `m_LowMantleMaxEdgeHeight`, `m_MediumMantleMaxEdgeHeight`, `m_bLowMantleUseStepUp`, `m_fLowMantleStepUpBlendTime`,
+  `m_MaxVerticalAngleForEdgeFace`, `m_MaxHorizontalAngleForEdgeFace`, `m_MaxSlopeAngleForEdgeTop`, `m_MantleEdgeSearchDist`,
+  `m_fMantleForwardMoveAmount`, `m_fFallSpeedForLedgeGrab`, `m_fMaxFallSpeedForMantle`, `m_fLedgeGrabMantleMinEdgeHeight`.
+  Every Blink finder tweak (Corvo's and the default player's) leaves out `m_MantleMinEdgeHeight`, so after a blink it is 0.
+- **The mantle animations**, `Empty_MantleLow/Medium/High` and `Empty_CrouchMantleLow/Medium/High` in the first-person
+  AnimSets: the root bone `root0_jnt` carries the climb (a rise and, for the standing ones, 40 cm forward), and each
+  ends at its `DishonoredNotify_AnimStateExit`. They play at `m_MantleAnimRate`.
+- `StatePlayerMasterMantle`: `m_bFaceEdge` (true).
+
+### Finding the edge
+
+The finder works from the player's feet, their current collision box (standing or crouched) and the standing box, their
+facing and their velocity.
+
+1. **Room above**: the current box is swept straight up from where it stands by
+   `m_MantleMaxEdgeHeight − 2·box half-height + 2·standing half-height`. The room is how far it got plus the box height.
+2. **The search range**, as heights of the box's centre above the feet:
+   - falling faster than `m_fMaxFallSpeedForMantle`: no mantle;
+   - falling faster than `m_fFallSpeedForLedgeGrab`: the lowest edge is `m_fLedgeGrabMantleMinEdgeHeight`, and the catch
+     is a hard one (the game plays an impact animation);
+   - otherwise the lowest edge is `m_MantleMinEdgeHeight`.
+
+   The lowest height is that edge minus one step (at least 0) plus the box half-height. The highest is the room above
+   minus the half-height, or `m_MantleMaxEdgeHeight` plus the half-height, whichever is lower. The first height is
+   offset so that the steps land exactly on the highest, minus 0.1.
+3. **Forward searches**, one height per step of `m_LineCheckStepSize`, from the lowest up: the box is swept forward
+   `m_MantleEdgeSearchDist` along the facing.
+   - Hitting a character ends the search.
+   - Hitting a face counts as the wall if it leans back no more than `m_MaxVerticalAngleForEdgeFace` from vertical
+     (overhangs pass), and if the angle between the facing and the face's inward direction is within
+     `m_MaxHorizontalAngleForEdgeFace`. Then the search moves to where the box touched it, turns to point into it, and
+     from then on reaches `m_fMantleForwardMoveAmount` (the first time), then whatever of that reach was left after the
+     last contact.
+   - Once the wall has been found, the first height where the sweep is clear is the top of the edge.
+   - Past the highest height there is no edge.
+4. **The top**: the box is swept down from the end of that clear sweep by a step plus 1. A surface steeper than
+   `m_MaxSlopeAngleForEdgeTop` there ends the search.
+5. **Room to stand**: a standing box is placed with its feet at the edge's height and swept along that last forward
+   reach. If it hits something, or if it would stick up past the room measured above, the mantle forces a crouch.
+
+The result is the place to climb from (the wall-side position at the feet's height), a yaw facing into the wall, the
+edge height (that clear height minus the box half-height), whether it was a hard catch, and whether it forces a crouch.
+
+### Climbing
+
+- **Step-up**: if `m_bLowMantleUseStepUp`, the edge is no higher than `m_LowMantleMaxEdgeHeight` and no crouch is
+  forced, the player is moved three times, each move stopping at whatever is in the way: to the climb position, up by
+  the edge height, and forward by `m_fMantleForwardMoveAmount`. The view catches up over `m_fLowMantleStepUpBlendTime`.
+  There is no mantle state.
+- **Mantle**: otherwise the player plays the low, medium or high mantle by edge height (`m_LowMantleMaxEdgeHeight`,
+  `m_MediumMantleMaxEdgeHeight`), and the crouched one if a crouch is forced. World collision is off. Over the
+  animation's blend-in time the player slides from where they were to the climb position and turns to face the edge.
+  At the same time the animation's root motion moves them. The game measures the root's rise from the clip's start to its
+  end, and the rise is stretched to the edge height. The mantle ends at the clip's exit notify; then the player is moved
+  out of anything they ended inside.
+
+### Still open for the mantle
+- The blend-in time comes from the mantle's animation state, not read yet. The kit uses the game's default, 0.2 s.
+- How exactly the root's measured rise scales the motion. The kit stretches the rise to the edge height and keeps the forward
+  travel. The crouched clips have no forward travel, so the kit moves those over the edge by the finder's last reach,
+  and anything that has it carry at least that far.
+- The impact animation played on a hard catch, cancelling a mantle (`DishonoredNotify_AllowMantleCancel`), the
+  step-up's `m_fLowMantleStepUpDisallowFallTime`, and what the hit-actor checks during the search exclude besides characters.
+- The game spreads the search over frames within `m_fMaxMantleCheckTimePerTick_ms` and keeps the last spot found; the kit
+  searches when it needs a spot.
+
 ## 6. Player motion: where the data lives (2026-10-07)
 
 All of this is read at runtime by `crates/dis_data`. Values are not repeated here.
@@ -570,7 +645,7 @@ carrying-corpse variant). The vertical velocity of the base the player stands on
 | All speeds, acceleration, air control, gravity, step height, collision sizes, mantle thresholds, slide timing, lean springs, swim | **Game values**, read at runtime |
 | Walking and falling integration | UE3 `CalcVelocity`-style model; Dishonored's own "LocoNew" path not reproduced yet |
 | Strafe and backward multipliers | Applied as a direction ellipse; the game's exact blend is not known |
-| Mantle finder and mantle motion | Modelled from the tweak fields and animation lengths; the game's own edge finder is not reproduced. Ledges are world geometry only: characters are never mantled onto |
+| Mantle edge finder, step-up and mantle motion | **Follows the game's behaviour** (§5f): the finder, the step-up and the root-motion climb; the climb's blend-in time is the game's default |
 | Drop assassination: target search, lock-on dive, side, landing place and hold time | **Follows the game's behaviour** (§5b), with tweak values, anchors and timings read at runtime |
 | Sword: swing choice and chaining, reach, target, blade sweep, environment hits, damage | **Follows the game's behaviour** (§5c); with several characters in one sweep the kit takes the first |
 | Ground assassination: availability, side, slow/fast pacing, plain kill, victim placement, hold time | **Follows the game's behaviour** (§5d), with tweak values, anchors and timings read at runtime |
@@ -753,8 +828,7 @@ Blink, Agility, the drop and ground assassinations, the sword, tests), `wwise` (
 the game's particle effects, sword fights and drop and ground assassinations on box guards, and `--autopilot` verification routes).
 
 Next:
-1. Match the game's mantle edge finder (`DishonoredMantleEdgeFinderComponent`) more closely,
-   and the Slide and Leaning states. Replace the models above.
+1. Match the game's Slide and Leaning states, and replace the models above.
 2. The other passive powers' motion effects, if any are wanted (Vitality, Bloodthirsty and Shadow Kill don't change motion).
 3. Drive camera bob and mantle camera motion from the game's camera animations (the Edge decoder now exists).
 4. SubUV flipbooks and original particle material scrolling/distortion; Blink's screen

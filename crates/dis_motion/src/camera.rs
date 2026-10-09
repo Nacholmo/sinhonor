@@ -22,6 +22,9 @@ pub struct CameraFeel {
     dip_vel: f32,
     pub lean_angle: f32,
     lean_vel: f32,
+    /// A step-up mantle moves the player at once; the view starts where it was and catches up.
+    step_offset: Vec3,
+    step_time: f32,
     initialised: bool,
 }
 
@@ -71,7 +74,12 @@ impl CameraFeel {
         let lever = (base_eye.z - c.feet_z) * t.lean.height_pct * 0.5;
         let (_, right) = crate::yaw_axes(c.yaw);
         let lean_off = right * (self.lean_angle.sin() * lever) - Vec3::Z * (lever * (1.0 - self.lean_angle.cos()));
-        let mut eye = base_eye + Vec3::Z * (bob_z + self.dip);
+        if self.step_time > 0.0 {
+            let left = (self.step_time - dt).max(0.0);
+            self.step_offset *= left / self.step_time;
+            self.step_time = left;
+        }
+        let mut eye = base_eye + Vec3::Z * (bob_z + self.dip) + self.step_offset;
         let half = Vec3::splat(CAMERA_HALF);
         if lean_off.length_squared() > 1e-4 {
             match world.sweep(eye, eye + lean_off, half) {
@@ -90,6 +98,14 @@ impl CameraFeel {
 
         let fov_target = t.fov_deg + c.blink_distortion * 6.0;
         self.fov_deg += (fov_target - self.fov_deg) * (1.0 - (-t.fov_blend_speed * dt).exp());
+    }
+
+    /// The player was moved by `delta` at once: the view follows over `blend` seconds.
+    pub(crate) fn step(&mut self, delta: Vec3, blend: f32) {
+        if blend > 0.0 {
+            self.step_offset -= delta;
+            self.step_time = blend;
+        }
     }
 
     /// Kicks the landing dip; `impact` is the downward speed at touchdown.

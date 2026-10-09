@@ -15,6 +15,8 @@ const MAX_SUBSTEP: f32 = 1.0 / 90.0;
 const FLOOR_SNAP: f32 = 4.0;
 /// How long jump must have been held, at the top of a jump, for the fixed power jump (game constant).
 pub const POWER_JUMP_MIN_HOLD: f32 = 0.05;
+/// How long the turn and slide to a mantle's start take (the game's default animation blend).
+const MANTLE_INTRO_TIME: f32 = 0.2;
 /// Upward speed at or below which a jump has reached its top (game constant).
 const JUMP_TOP_SPEED: f32 = 1e-4;
 
@@ -67,6 +69,8 @@ pub struct StepEvents {
     pub landed: Option<f32>,
     pub fall_damage: Option<f32>,
     pub mantled: Option<MantleKind>,
+    /// The mantle caught an edge while falling fast (the game plays an impact animation).
+    pub mantle_impact: bool,
     pub slid: bool,
     pub blink: Vec<BlinkEvent>,
     /// Locked on to a drop-assassination target that is still too far below, and diving.
@@ -88,21 +92,49 @@ pub struct JumpRun {
     pub power: bool,
 }
 
+/// A place to climb from, as the edge finder reports it.
 #[derive(Clone, Copy, Debug)]
-struct Ledge {
-    dest: Vec3,
+struct MantleSpot {
+    /// Where the climb starts: the player's feet, against the wall.
+    start_feet: Vec3,
+    /// Facing the edge.
+    yaw: f32,
     edge_height: f32,
+    /// The finder's last step forward, over the edge.
+    over: Vec3,
+    /// Caught while falling fast (the game plays an impact animation first).
+    impact: bool,
+    /// No room to stand on top.
     crouch: bool,
-    kind: MantleKind,
+}
+
+/// What the forward search found, for the last two checks.
+struct MantleProbe {
+    feet: Vec3,
+    ext: Vec3,
+    ext2: Vec3,
+    clear: f32,
+    origin: Vec3,
+    h: f32,
+    end: Vec3,
+    over: Vec3,
+    impact: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
 struct MantleRun {
     from: Vec3,
-    to: Vec3,
+    start: Vec3,
+    /// How far the view turns to face the edge.
+    yaw_turn: f32,
+    rise: f32,
+    over: Vec3,
+    /// Index into `AnimTimes::mantle`.
+    clip: usize,
+    /// Animation time, and real time.
     t: f32,
-    duration: f32,
-    crouch: bool,
+    elapsed: f32,
+    rate: f32,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -349,7 +381,7 @@ impl Motion {
             MotionState::Walking => self.walk(world, input, prev, dt, ev),
             MotionState::Falling => self.fall(world, input, dt, ev),
             MotionState::Sliding => self.slide_tick(world, input, prev, dt, ev),
-            MotionState::Mantling => self.mantle_tick(dt),
+            MotionState::Mantling => self.mantle_tick(world, dt),
             MotionState::Swimming => self.swim(world, input, prev, dt, ev),
             MotionState::Ladder => self.ladder(world, input, prev, dt, ev),
             MotionState::Blinking | MotionState::Takedown => {}
@@ -454,8 +486,8 @@ impl Motion {
 
         // Jump (or mantle, if a ledge is in reach).
         if Self::pressed(input.jump, prev.jump) {
-            if let Some(ledge) = self.find_ledge(world, &t.mantle, false) {
-                self.start_mantle(ledge, ev);
+            if let Some(spot) = self.find_mantle_spot(world, &t.mantle) {
+                self.start_mantle(world, spot, &t.mantle, ev);
                 return;
             }
             if self.crouched && !self.set_crouched(world, false) {
@@ -622,8 +654,8 @@ impl Motion {
 
         // Ledge catch: pressing toward a ledge (or holding jump) while airborne.
         if input.move_axis.y > 0.1 || input.jump {
-            if let Some(ledge) = self.find_ledge(world, &t.mantle, true) {
-                self.start_mantle(ledge, ev);
+            if let Some(spot) = self.find_mantle_spot(world, &t.mantle) {
+                self.start_mantle(world, spot, &t.mantle, ev);
                 return;
             }
         }
@@ -706,148 +738,187 @@ impl Motion {
 
     // ----------------------------------------------------------------- mantle
 
-    /// Probes for a mantleable ledge in front of the player.
-    fn find_ledge(&self, world: &dyn World, m: &MantleTuning, airborne: bool) -> Option<Ledge> {
-        let t = &self.tuning;
-        let half = self.half();
-        let feet = self.pos.z - half.z;
-        let (fwd, _) = yaw_axes(self.yaw);
-        let tiny = Vec3::splat(1.0);
-        let reach = half.x + m.edge_search_dist;
-        if airborne && self.vel.z < -m.max_fall_speed_for_mantle {
+    /// The game's mantle edge finder (`NOTES.md` §5f): how much room there is above, then a box
+    /// the player's size swept forward at rising heights until it meets a wall it can climb and
+    /// then clears its top, then a look at the top's slope and whether there's room to stand.
+    fn find_mantle_spot(&self, world: &dyn World, m: &MantleTuning) -> Option<MantleSpot> {
+        let ext = self.half();
+        let ext2 = Vec3::new(ext.x, ext.y, Self::half_for(&self.tuning, false).z);
+        let feet = self.feet();
+        let (facing, _) = yaw_axes(self.yaw);
+
+        // Room above: the box swept up from where it stands.
+        let centre = feet + Vec3::Z * ext.z;
+        let up = m.max_edge_height - 2.0 * ext.z + 2.0 * ext2.z;
+        let frac = if up > 0.0 { world.sweep(centre, centre + Vec3::Z * up, ext).map_or(1.0, |h| h.time) } else { 1.0 };
+        let clear = frac * up + 2.0 * ext.z;
+
+        // The lowest edge worth looking for depends on how fast the player is falling.
+        if self.vel.z < -m.max_fall_speed_for_mantle {
             return None;
         }
+        let step = m.line_check_step.max(1.0);
+        let (min_edge, impact) = if self.vel.z < -m.fall_speed_for_ledge_grab { (m.ledge_grab_min_edge_height, true) } else { (m.min_edge_height, false) };
+        let min_off = (min_edge - step).max(0.0) + ext.z;
+        let max_off = (clear - ext.z).min(m.max_edge_height + ext.z);
+        // Heights are the box centre's above the feet, stepped so the last lands on the highest.
+        let range = max_off - min_off;
+        let mut h = min_off + (range - (range / step).floor() * step) - 0.1;
 
-        // 1. Scan up the wall in front for its top edge.
-        let max_face_z = m.max_vertical_angle_edge_face_deg.to_radians().sin();
-        let max_face_h = m.max_horizontal_angle_edge_face_deg.to_radians().cos();
-        let mut wall = None;
-        let mut edge_found = false;
-        let mut h = if airborne { m.line_check_step } else { m.min_edge_height };
-        while h <= m.max_edge_height + m.line_check_step {
-            let s = Vec3::new(self.pos.x, self.pos.y, feet + h);
-            match world.sweep(s, s + fwd * reach, tiny) {
+        let max_tilt = m.max_vertical_angle_edge_face_deg.to_radians();
+        let max_turn = m.max_horizontal_angle_edge_face_deg.to_radians();
+        let (mut origin, mut dir, mut dist) = (feet, facing, m.edge_search_dist);
+        let (mut wall, mut first) = (false, true);
+        loop {
+            let s = origin + Vec3::Z * h;
+            let e = s + dir * dist;
+            match world.sweep(s, e, ext) {
                 // Characters are not ledges.
                 Some(hit) if hit.is_pawn => return None,
-                Some(hit) if !hit.start_penetrating && hit.normal.z.abs() <= max_face_z && (-fwd).dot(hit.normal.with_z(0.0).normalize_or_zero()) >= max_face_h => {
-                    wall = Some(hit);
-                }
-                Some(_) => {
-                    if wall.is_some() {
-                        return None;
+                Some(hit) if !hit.start_penetrating => {
+                    let n = hit.normal;
+                    let tilt = std::f32::consts::FRAC_PI_2 - n.z.clamp(-1.0, 1.0).acos();
+                    let turn = (-(facing.x * n.x + facing.y * n.y)).clamp(-1.0, 1.0).acos();
+                    if tilt <= max_tilt && turn <= max_turn {
+                        // A climbable face: carry on up it, pressed against it.
+                        wall = true;
+                        dir = Vec3::new(-n.x, -n.y, 0.0);
+                        origin = Vec3::new(hit.location.x, hit.location.y, origin.z);
+                        dist = if first { m.forward_move_amount } else { (1.0 - hit.time) * dist };
+                        first = false;
                     }
                 }
-                None => {
-                    if wall.is_some() {
-                        edge_found = true;
-                        break;
-                    }
-                }
+                Some(_) => {}
+                None if wall => return self.check_mantle_spot(world, m, MantleProbe { feet, ext, ext2, clear, origin, h, end: e, over: dir * dist, impact }),
+                None => {}
             }
-            h += m.line_check_step;
+            h += step;
+            if h > max_off {
+                return None;
+            }
         }
-        let wall = wall?;
-        if !edge_found {
-            return None;
-        }
+    }
 
-        // 2. Find the top surface just past the edge.
-        let over = wall.location + fwd * (m.forward_move_amount + 1.0);
-        let top_start = Vec3::new(over.x, over.y, feet + m.max_edge_height + 2.0);
-        let top_end = Vec3::new(over.x, over.y, feet + m.min_edge_height.min(h) - 2.0);
-        let top = world.sweep(top_start, top_end, tiny)?;
-        if top.start_penetrating || top.is_pawn || top.normal.z < m.max_slope_angle_edge_top_deg.to_radians().cos() {
-            return None;
+    /// The edge's top must not be too steep; then, is there room to stand on it?
+    fn check_mantle_spot(&self, world: &dyn World, m: &MantleTuning, p: MantleProbe) -> Option<MantleSpot> {
+        let step = m.line_check_step.max(1.0);
+        if let Some(top) = world.sweep(p.end, p.end - Vec3::Z * (step + 1.0), p.ext) {
+            if !top.start_penetrating && top.normal.z.clamp(-1.0, 1.0).acos() > m.max_slope_angle_edge_top_deg.to_radians() {
+                return None;
+            }
         }
-        let surface_z = top.location.z - tiny.z;
-        let edge_height = surface_z - feet;
-        let min_h = if airborne { m.line_check_step } else { m.min_edge_height };
-        if edge_height < min_h || edge_height > m.max_edge_height {
-            return None;
-        }
-        if airborne && -self.vel.z > m.fall_speed_for_ledge_grab && edge_height < m.ledge_grab_min_edge_height {
-            return None;
-        }
+        let stand = Vec3::new(p.origin.x, p.origin.y, p.origin.z + p.h - p.ext.z + p.ext2.z);
+        let crouch = if p.ext2.z + stand.z <= p.clear + p.feet.z { world.sweep(stand, stand + p.over, p.ext2).is_some() } else { true };
+        Some(MantleSpot {
+            start_feet: Vec3::new(p.origin.x, p.origin.y, p.feet.z),
+            yaw: p.over.y.atan2(p.over.x),
+            edge_height: p.h - p.ext.z,
+            over: p.over,
+            impact: p.impact,
+            crouch,
+        })
+    }
 
-        // 3. Room on top: standing if possible, else crouched.
-        let xy = Vec3::new(wall.location.x, wall.location.y, 0.0) + fwd * (t.radius + m.forward_move_amount);
-        let stand_half = Self::half_for(t, false);
-        let crouch_half = Self::half_for(t, true);
-        let stand = Vec3::new(xy.x, xy.y, surface_z + stand_half.z + SKIN);
-        let crouch_dest = Vec3::new(xy.x, xy.y, surface_z + crouch_half.z + SKIN);
-        let (dest, crouch, dhalf) = if !world.overlaps(stand, stand_half) {
-            (stand, false, stand_half)
-        } else if !world.overlaps(crouch_dest, crouch_half) {
-            (crouch_dest, true, crouch_half)
-        } else {
-            return None;
-        };
-
-        // 4. Clear path: straight up to the ledge height, then over it.
-        let up_to = Vec3::new(self.pos.x, self.pos.y, dest.z.max(self.pos.z));
-        let probe_half = Vec3::new(dhalf.x.min(half.x), dhalf.y.min(half.y), dhalf.z) - Vec3::splat(1.0);
-        let start = Vec3::new(self.pos.x, self.pos.y, self.pos.z - half.z + probe_half.z + 1.0);
-        if world.sweep(start, up_to, probe_half).is_some_and(|h| h.time < 0.999) {
-            return None;
-        }
-        if world.sweep(up_to, dest, probe_half).is_some_and(|h| h.time < 0.999) {
-            return None;
-        }
-        let kind = if edge_height <= m.low_max_edge_height {
+    /// Climbs onto `spot`: low edges with room to stand are stepped up at once; the rest play the
+    /// mantle, moved by its animation.
+    fn start_mantle(&mut self, world: &dyn World, spot: MantleSpot, m: &MantleTuning, ev: &mut StepEvents) {
+        let kind = if spot.edge_height <= m.low_max_edge_height {
             MantleKind::Low
-        } else if edge_height <= m.medium_max_edge_height {
+        } else if spot.edge_height <= m.medium_max_edge_height {
             MantleKind::Medium
         } else {
             MantleKind::High
         };
-        Some(Ledge { dest, edge_height, crouch, kind })
-    }
-
-    fn start_mantle(&mut self, ledge: Ledge, ev: &mut StepEvents) {
-        let t = &self.tuning;
-        let a = &t.anim;
-        let anim = match (ledge.kind, ledge.crouch || self.crouched) {
-            (MantleKind::Low, false) => a.mantle_low,
-            (MantleKind::Medium, false) => a.mantle_medium,
-            (MantleKind::High, false) => a.mantle_high,
-            (MantleKind::Low, true) => a.crouch_mantle_low,
-            (MantleKind::Medium, true) => a.crouch_mantle_medium,
-            (MantleKind::High, true) => a.crouch_mantle_high,
-        };
-        let mut duration = anim / t.mantle.anim_rate.max(0.01);
-        if ledge.kind == MantleKind::Low && t.mantle.low_uses_step_up {
-            // Low ledges use a quick step-up blend instead of the full climb.
-            duration = (t.mantle.low_step_up_blend_time * 2.0).min(duration);
+        self.last_mantle = Some(kind);
+        ev.mantled = Some(kind);
+        ev.mantle_impact = spot.impact;
+        self.jump = None;
+        let (fwd, _) = yaw_axes(spot.yaw);
+        if kind == MantleKind::Low && m.low_uses_step_up && !spot.crouch {
+            // Step-up: to the spot, up the edge, forward onto it, each move stopping at whatever
+            // is in the way; the view catches up.
+            let half = self.half();
+            let before = self.pos;
+            let mut p = self.pos;
+            for d in [spot.start_feet + Vec3::Z * half.z - p, Vec3::Z * spot.edge_height, fwd * m.forward_move_amount] {
+                p = match world.sweep(p, p + d, half) {
+                    Some(h) if h.start_penetrating => p,
+                    Some(h) => h.location,
+                    None => p + d,
+                };
+            }
+            self.pos = p;
+            self.vel.z = 0.0;
+            self.state = MotionState::Walking;
+            self.camera.step(p - before, m.low_step_up_blend_time);
+            return;
         }
-        // The pawn's stance switches up front so the box matches the destination.
         let feet = self.feet();
-        self.crouched = ledge.crouch;
-        self.crouch_wanted = ledge.crouch;
-        let from = feet + Vec3::Z * self.half().z;
-        self.mantle = MantleRun { from, to: ledge.dest, t: 0.0, duration: duration.max(0.05), crouch: ledge.crouch };
+        if spot.crouch {
+            self.crouched = true;
+            self.crouch_wanted = true;
+        }
+        let half = self.half();
+        let from = feet + Vec3::Z * half.z;
+        self.mantle = MantleRun {
+            from,
+            start: spot.start_feet + Vec3::Z * half.z,
+            yaw_turn: (spot.yaw - self.yaw + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI,
+            rise: spot.edge_height,
+            over: spot.over,
+            clip: kind as usize + if spot.crouch { 3 } else { 0 },
+            t: 0.0,
+            elapsed: 0.0,
+            rate: m.anim_rate.max(0.01),
+        };
         self.pos = from;
         self.vel = Vec3::ZERO;
         self.state = MotionState::Mantling;
-        self.last_mantle = Some(ledge.kind);
-        ev.mantled = Some(ledge.kind);
-        let _ = ledge.edge_height;
     }
 
-    fn mantle_tick(&mut self, dt: f32) {
-        let m = &mut self.mantle;
-        m.t += dt;
-        let u = (m.t / m.duration).min(1.0);
-        // Rise first (ease-out), then move over the edge.
-        let rise = (u / 0.65).min(1.0);
-        let rise = 1.0 - (1.0 - rise) * (1.0 - rise);
-        let over = ((u - 0.45) / 0.55).clamp(0.0, 1.0);
-        let over = over * over * (3.0 - 2.0 * over);
-        let z = m.from.z + (m.to.z - m.from.z) * rise;
-        let xy = m.from.truncate() + (m.to.truncate() - m.from.truncate()) * over;
-        self.pos = Vec3::new(xy.x, xy.y, z);
-        if u >= 1.0 {
-            self.pos = m.to;
-            self.crouched = m.crouch;
+    /// The mantle under way: a short turn and slide to the spot, then the animation's root path,
+    /// its rise scaled to the edge height. The world doesn't block it.
+    fn mantle_tick(&mut self, world: &dyn World, dt: f32) {
+        let run = &mut self.mantle;
+        let clip = &self.tuning.anim.mantle[run.clip];
+        let intro_before = (run.elapsed / MANTLE_INTRO_TIME).min(1.0);
+        run.elapsed += dt;
+        run.t += dt * run.rate;
+        let intro = (run.elapsed / MANTLE_INTRO_TIME).min(1.0);
+        self.yaw = (self.yaw + run.yaw_turn * (intro - intro_before)).rem_euclid(std::f32::consts::TAU);
+
+        let exit = clip.exit.max(0.05);
+        // The rise and travel are measured from the clip's start to its end, as the game does.
+        let (rise_total, fwd_total) = clip.root.last().map_or((0.0, 0.0), |s| (s.y, s.z));
+        let (rise, fwd) = if rise_total < 1.0 {
+            ((run.t / exit).min(1.0), (run.t / exit).min(1.0))
+        } else {
+            match clip.root.iter().position(|s| s.x >= run.t) {
+                Some(0) => (0.0, 0.0),
+                Some(k) => {
+                    let (a, b) = (clip.root[k - 1], clip.root[k]);
+                    let u = ((run.t - a.x) / (b.x - a.x).max(1e-6)).clamp(0.0, 1.0);
+                    let s = a + (b - a) * u;
+                    (s.y / rise_total, if fwd_total >= 1.0 { s.z / fwd_total } else { s.y / rise_total })
+                }
+                None => (1.0, 1.0),
+            }
+        };
+        // Over the edge by the animation's travel, at least as far as the finder stepped.
+        let over = run.over.with_z(0.0);
+        let along = over.normalize_or_zero() * fwd_total.max(over.length());
+        self.pos = run.from + (run.start - run.from) * intro + Vec3::Z * (run.rise * rise) + along * fwd;
+
+        if run.t >= exit {
+            // Out of anything the climb ended inside, back toward the edge.
+            let half = self.half();
+            let back = along.normalize_or_zero();
+            for _ in 0..8 {
+                if !world.overlaps(self.pos, half) {
+                    break;
+                }
+                self.pos -= back * 5.0;
+            }
             self.state = MotionState::Walking;
         }
     }
@@ -855,8 +926,8 @@ impl Motion {
     /// After a blink: restore velocity (done by Blink), then ledge check, then try to stand.
     fn after_blink(&mut self, world: &dyn World, ev: &mut StepEvents) {
         let t = self.tuning.clone();
-        if let Some(ledge) = self.find_ledge(world, &t.mantle_blink, true) {
-            self.start_mantle(ledge, ev);
+        if let Some(spot) = self.find_mantle_spot(world, &t.mantle_blink) {
+            self.start_mantle(world, spot, &t.mantle_blink, ev);
             return;
         }
         if self.crouched && !self.crouch_wanted {
@@ -1055,8 +1126,8 @@ impl Motion {
         }
         // Climb out onto a ledge.
         if at_surface && (Self::pressed(input.jump, prev.jump) || axis.y > 0.1) {
-            if let Some(ledge) = self.find_ledge(world, &t.mantle, true) {
-                self.start_mantle(ledge, ev);
+            if let Some(spot) = self.find_mantle_spot(world, &t.mantle) {
+                self.start_mantle(world, spot, &t.mantle, ev);
                 return;
             }
         }
@@ -1095,16 +1166,16 @@ impl Motion {
             self.state = MotionState::Walking;
         } else if feet >= l.top_z - t.mantle.low_max_edge_height.min(60.0) && self.vel.z > 0.0 {
             // Near the top: climb off onto the landing behind the ladder.
-            if let Some(ledge) = self.find_ledge(world, &t.mantle, true) {
-                self.start_mantle(ledge, ev);
+            if let Some(spot) = self.find_mantle_spot(world, &t.mantle) {
+                self.start_mantle(world, spot, &t.mantle, ev);
                 return;
             }
             let stand_half = Self::half_for(&t, false);
             let into = Vec3::new(-l.normal.x, -l.normal.y, 0.0) * (t.radius * 2.0 + t.mantle.forward_move_amount);
             let dest = Vec3::new(self.pos.x + into.x, self.pos.y + into.y, l.top_z + stand_half.z + SKIN);
             if !world.overlaps(dest, stand_half) {
-                let ledge = Ledge { dest, edge_height: l.top_z - feet, crouch: false, kind: MantleKind::Low };
-                self.start_mantle(ledge, ev);
+                let spot = MantleSpot { start_feet: self.feet(), yaw: into.y.atan2(into.x), edge_height: l.top_z - feet, over: into, impact: false, crouch: false };
+                self.start_mantle(world, spot, &t.mantle, ev);
             }
         }
     }

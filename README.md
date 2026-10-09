@@ -52,14 +52,11 @@ Distances are in metres; the game works in Unreal units, where 1 uu = 1 cm.
 - **Crouch**: the collision shrinks from 1.75 m tall to 58 cm (`DishonoredPawn`'s cylinder and `CrouchHeight`), keeping your feet in place. Standing up only happens if there's room.
 - **Auto-crouch**: walk at a gap only a crouched Corvo fits through and he crouches by himself, then stands once the way ahead is clear (`m_fAutoCrouchTestDistance` 1 m, `m_fAutoCrouchMinCrawlDepth`).
 - **Slide**: crouch while sprinting. Your speed bleeds from where you started down to sneak speed over the game's 1.1 s (`m_fSlideTime`). The first half can't be cancelled (`m_fSlidePercentNotCancelable` 0.5); after that, crouch stands you up and jump jumps out of it.
-- **Mantle**: jump at a ledge, or hold forward or jump while falling past one. The ledge finder walks up the wall in 12 cm steps, finds the top, checks there's room for you (standing, or else crouched), then climbs. The heights come from `m_pMantleTweaks`:
-  - under 44 cm: you just step up (`MaxStepHeight`);
-  - 55 cm–1.2 m: a low mantle, the game's quick step-up blend;
-  - 1.2–1.7 m: medium;
-  - 1.7–2.3 m: high;
-  - over 2.3 m: too high, so Blink up.
-
-  Each kind lasts as long as its animation (`Sword_Ready_MantleLow`, `…Medium`, `…High`, and the sneak variants). Falling faster than 10 m/s you can only catch edges at least 1.55 m high (`m_fFallSpeedForLedgeGrab`, `m_fLedgeGrabMantleMinEdgeHeight`), and edges, faces and tops have to be within the tweak's angle limits.
+- **Mantle**: jump at a ledge, or hold forward or jump while falling past one. The ledge finder is the game's own (`NOTES.md` §5f), with the heights from `m_pMantleTweaks`:
+  - it first measures the room above you, then sweeps a box your size forward 50 cm (`m_MantleEdgeSearchDist`) at heights rising 12 cm at a time (`m_LineCheckStepSize`). The first wall it meets must be near-vertical and facing you (within 20° and 45°). From then on the box stays pressed against it and reaches 20 cm in (`m_fMantleForwardMoveAmount`). The first height where that reach is clear is the top of the edge;
+  - the top must be no steeper than 45°, and a standing box must fit going over it; otherwise you climb crouched;
+  - under 44 cm you just step up (`MaxStepHeight`). Low edges, 55 cm–1.2 m, are a step-up mantle: three quick moves (to the wall, up, 20 cm on) with the view catching up over 0.2 s (`m_fLowMantleStepUpBlendTime`). Medium (1.2–1.7 m) and high (1.7–2.3 m) ones turn you to face the edge and climb along the animation's own root motion, its rise stretched to the edge's height, until the animation's exit (`Empty_MantleMedium`, `…High`, or the crouched ones). Over 2.3 m is too high, so Blink up;
+  - falling faster than 10 m/s you can only catch edges at least 1.55 m above your feet (`m_fFallSpeedForLedgeGrab`, `m_fLedgeGrabMantleMinEdgeHeight`), and past 20 m/s none (`m_fMaxFallSpeedForMantle`). After a blink, the Blink finder (`m_pMantleBlinkTweaks`) has no minimum height.
 - **Lean**: Q and E lean up to 15°. The lean is a spring (`DefaultCamera.ini`'s springiness 80 and damping 12) that tilts the camera by half the angle, and it is clamped so your head never goes through a wall.
 - **Swim**: walk into deep water and you swim at up to 6 m/s (`m_WaterSpeed`). Like the game, you move in strokes: strong acceleration for 0.3 s, then a weaker glide (`DefaultPlayerState.ini`'s swim block). Buoyancy holds your eyes at the surface. Swim at a ledge and jump to climb out.
 - **Ladder**: walk into one to grab on. You climb at 2.54 m/s (`LadderSpeed`) toward where you look, and step off onto the landing at the top.
@@ -149,7 +146,7 @@ The movement needs only the tuning. Everything else is optional and skipped with
 
 **What's still approximate:**
 
-- **Not yet exact**: walking uses UE3's standard `CalcVelocity` model, not Dishonored's own "LocoNew" walking path. The mantle's ledge finder, the slide and the lean are modelled from the tweak values and animation lengths.
+- **Not yet exact**: walking uses UE3's standard `CalcVelocity` model, not Dishonored's own "LocoNew" walking path. The slide and the lean are modelled from the tweak values and animation lengths.
 - **Camera**: the head bob is procedural. The game drives it from a camera animation (`Ply_Nav_LocoCamera_at`), which the Edge decoder can now read but nothing plays yet.
 - **Effects**: SubUV flipbooks and the original materials' scrolling/distortion graphs aren't done. Mesh particles use cooked LOD 0 geometry, UVs, vertex colours and rotation curves. The particle materials, tattoo brightness and Blink lens shader approximate the look; they do not reconstruct the original shaders. The world camera uses HDR bloom.
 - **Smoke**: the hand smoke is simulated relative to the camera, so it doesn't trail behind you as it does in the game.
@@ -199,7 +196,7 @@ let mut motion = Motion::new(MotionTuning::from_game(&data), spawn, yaw);
 let events = motion.update(&world, &input, dt);
 ```
 
-Read back `motion.camera.eye`, `motion.yaw`, `motion.pitch`, `motion.camera.roll` and `motion.camera.fov_deg` for the camera, `motion.state` and `events` (including `power_jumped`) for animation and sound, `motion.blink` (mode, target and `fx` screen parameters) for Blink's visuals, and `motion.takedown` (the prompt, the lock-on and the kill under way) plus `events.drop_assassination` and `events.assassination` (which also says where to put the victim) to kill the target on your side, and `motion.melee` (the swing playing and the target) plus `events.melee` (swings, hits with their damage, wall strikes) for the sword. Coordinates are Unreal-style: Z up, centimetres. Convert at your boundary.
+Read back `motion.camera.eye`, `motion.yaw`, `motion.pitch`, `motion.camera.roll` and `motion.camera.fov_deg` for the camera, `motion.state` and `events` (including `power_jumped`, and `mantled` with `mantle_impact` for a hard catch) for animation and sound, `motion.blink` (mode, target and `fx` screen parameters) for Blink's visuals, and `motion.takedown` (the prompt, the lock-on and the kill under way) plus `events.drop_assassination` and `events.assassination` (which also says where to put the victim) to kill the target on your side, and `motion.melee` (the swing playing and the target) plus `events.melee` (swings, hits with their damage, wall strikes) for the sword. Coordinates are Unreal-style: Z up, centimetres. Convert at your boundary.
 
 ## Tests
 
@@ -212,7 +209,7 @@ cargo test --workspace
 - settling on the floor and running at run speed;
 - the jump apex against ballistics;
 - Agility's power jump: only when jump is held to the top, once, and not without the power; and the other two jump styles;
-- stepping up small ledges and mantling tall ones;
+- stepping up small ledges and mantling tall ones; the edge finder's step-up for low edges and animation-driven climb (facing the edge) for high ones, refusing walls at a glancing angle, crouching under a low roof, and catching edges only well past them when falling fast;
 - the slide bleeding to crouch speed;
 - auto-crouching under a low gap;
 - Blink reaching a wall and keeping momentum, staying on the floor when cast crouched, and its squashed-sphere range;
@@ -230,8 +227,8 @@ All the tuning is read at runtime by `crates/dis_data`, and `cargo run --release
 - **Corvo's tweak tree** (`Startup.upk`): the root is `Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release`. It points at one attribute set per difficulty (each `DisAttribute` holds four values, Easy to VeryHard), the mantle tweaks, a separate mantle tweak used after a blink, and the camera tweaks.
 - **Pawn defaults** (`DishonoredGame.upk`, `Engine.upk`): collision size, crouch size, step height, eye height, ladder speed, walkable floor angle and friction, from the class default objects.
 - **INI files**: gravity, lean springs, swim strokes, FOV, bob and roll, the jump style, and the powers' upgrade levels with their attribute modifiers.
-- **Animation lengths** (`Startup.upk`): mantles, slides and landings last as long as the animations that play them.
-- **Behaviour**: Blink's targeting, travel, end and screen effect, and the jump, follow the behaviour specified in `NOTES.md` §5; the drop assassination follows §5b, the sword §5c, the ground assassination §5d and Agility §5e. No game code, decompiled or otherwise, is in this repository.
+- **Animations** (`Startup.upk`): slides and landings last as long as the animations that play them, and mantles follow their animation's root motion until its exit notify.
+- **Behaviour**: Blink's targeting, travel, end and screen effect, and the jump, follow the behaviour specified in `NOTES.md` §5; the drop assassination follows §5b, the sword §5c, the ground assassination §5d, Agility §5e and the mantle §5f. No game code, decompiled or otherwise, is in this repository.
 
 ## Layout
 
