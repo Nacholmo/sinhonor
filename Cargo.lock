@@ -1529,7 +1529,7 @@ dependencies = [
 
 [[package]]
 name = "cascade"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "glam",
  "upk",
@@ -1873,7 +1873,7 @@ dependencies = [
 
 [[package]]
 name = "dis_data"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cascade",
  "edge_anim",
@@ -1884,7 +1884,7 @@ dependencies = [
 
 [[package]]
 name = "dis_motion"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dis_data",
  "glam",
@@ -1952,7 +1952,7 @@ checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
 name = "edge_anim"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "glam",
  "upk",
@@ -4055,7 +4055,7 @@ checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
 name = "sinhonor_demo"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bevy",
  "cascade",
@@ -4601,7 +4601,7 @@ checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
 
 [[package]]
 name = "upk"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "lzokay-native",
 ]
@@ -5490,7 +5490,7 @@ dependencies = [
 
 [[package]]
 name = "wwise"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "lewton",
  "ww2ogg",
