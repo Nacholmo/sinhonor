@@ -1,7 +1,7 @@
 //! A simple [`World`] made of axis-aligned boxes, water volumes and ladders. Good for tests,
 //! prototypes and blockout levels; real hosts implement [`World`] over their own physics.
 
-use crate::{Hit, Ladder, PawnInfo, Vec3, Water, World};
+use crate::{Awareness, Hit, Ladder, PawnInfo, Vec3, Water, World};
 
 #[derive(Clone, Copy, Debug)]
 pub struct Aabb {
@@ -58,7 +58,7 @@ impl BoxWorld {
     /// A pawn that can also be fought and taken down, facing `yaw` (radians).
     pub fn add_character(&mut self, center: Vec3, half: Vec3, actor: u32, yaw: f32, health: f32) -> &mut Self {
         let floor_z = center.z - half.z;
-        let info = PawnInfo { center, floor_z, torso_z: floor_z + 2.0 * half.z * BOX_TORSO_HEIGHT, yaw, health };
+        let info = PawnInfo { center, floor_z, torso_z: floor_z + 2.0 * half.z * BOX_TORSO_HEIGHT, yaw, health, awareness: Awareness::Unaware, running: false };
         self.characters.push((actor, info));
         self.add_pawn(center, half, actor)
     }
@@ -66,6 +66,27 @@ impl BoxWorld {
     pub fn set_health(&mut self, actor: u32, health: f32) -> &mut Self {
         if let Some((_, p)) = self.characters.iter_mut().find(|(a, _)| *a == actor) {
             p.health = health;
+        }
+        self
+    }
+    /// Sets a character's awareness of the player.
+    pub fn set_awareness(&mut self, actor: u32, awareness: Awareness) -> &mut Self {
+        if let Some((_, p)) = self.characters.iter_mut().find(|(a, _)| *a == actor) {
+            p.awareness = awareness;
+        }
+        self
+    }
+    /// Moves a character (its feet to `feet`, facing `yaw`).
+    pub fn place_character(&mut self, actor: u32, feet: Vec3, yaw: f32) -> &mut Self {
+        let Some((_, p)) = self.characters.iter_mut().find(|(a, _)| *a == actor) else { return self };
+        let d = Vec3::new(feet.x - p.center.x, feet.y - p.center.y, feet.z - p.floor_z);
+        p.center += d;
+        p.floor_z += d.z;
+        p.torso_z += d.z;
+        p.yaw = yaw;
+        for s in self.solids.iter_mut().filter(|s| s.actor == actor) {
+            s.aabb.min += d;
+            s.aabb.max += d;
         }
         self
     }

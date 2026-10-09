@@ -5,7 +5,7 @@ use crate::blink::{BlinkEvent, PawnView};
 use crate::camera::{CameraFeel, CameraInput};
 use crate::collide::{find_floor, move_slide, step_up, SKIN};
 use crate::melee::{Melee, MeleeEvent, Swordsman};
-use crate::takedown::{self, Faller, Reach, Takedown, TakedownRun, DIVE_SPEED_SCALE};
+use crate::takedown::{self, Assassination, Faller, Reach, Takedown, TakedownKind, TakedownRun, DIVE_SPEED_SCALE};
 use crate::{yaw_axes, Blink, MantleTuning, MotionTuning, Side, Vec2, Vec3, World};
 
 /// Longest physics substep; larger frames are split.
@@ -68,6 +68,8 @@ pub struct StepEvents {
     pub drop_assassination: Option<(u32, Side)>,
     /// Sword swings, hits and recoils.
     pub melee: Vec<MeleeEvent>,
+    /// A ground assassination started (the target is dead; place it as given for the paired kill).
+    pub assassination: Option<Assassination>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -199,7 +201,13 @@ impl Motion {
         }
         self.prev = *input;
         let me = self.swordsman();
-        self.melee.target = Melee::crosshair(&self.tuning.melee, world, &me);
+        self.melee.target = Melee::crosshair(&self.tuning.melee, world, &me, self.tuning.melee.reach(me.velocity, me.aim));
+        self.takedown.tick(dt);
+        self.takedown.assassinate = if matches!(self.state, MotionState::Walking | MotionState::Falling | MotionState::Sliding) && self.takedown.diving.is_none() {
+            self.assassination_target(world)
+        } else {
+            None
+        };
         self.takedown.prompt = match self.takedown.diving {
             Some(target) => takedown::check(world, &self.tuning.drop_assassinate, &self.faller(), target).map(|r| (target, r)),
             None if self.state == MotionState::Falling => takedown::search(world, &self.tuning.drop_assassinate, &self.faller()),
@@ -284,6 +292,14 @@ impl Motion {
         // drop-assassination target is not also a swing.
         let can_fight = matches!(self.state, MotionState::Walking | MotionState::Falling | MotionState::Sliding) && self.takedown.diving.is_none();
         let swing_pressed = Self::pressed(input.attack, prev.attack) && ev.dove_at.is_none();
+        // An attack on a character that may be assassinated is an assassination, not a swing.
+        if swing_pressed && can_fight {
+            if let Some(target) = self.assassination_target(world) {
+                self.melee.run = None;
+                self.start_assassination(world, target, ev);
+                return;
+            }
+        }
         let me = Swordsman { attack: swing_pressed, can_fight, ..self.swordsman() };
         self.melee.tick(&self.tuning.melee, world, &me, dt, &mut ev.melee);
         if self.takedown.diving.is_some() && self.state != MotionState::Falling {
@@ -826,7 +842,7 @@ impl Motion {
     fn start_drop_kill(&mut self, world: &dyn World, target: u32, ev: &mut StepEvents) -> bool {
         let Some(info) = world.pawn(target) else { return false };
         let side = takedown::side_of(&info, self.pos);
-        let s = self.tuning.drop_assassinate.sides[side.index()];
+        let s = self.tuning.drop_assassinate.sides[side.index()].clone();
         let (feet, yaw) = takedown::landing(&info, &s);
         let from_eye = self.camera.eye;
         let half = Self::half_for(&self.tuning, false);
@@ -847,9 +863,54 @@ impl Motion {
         self.fall_peak_speed = 0.0;
         self.state = MotionState::Takedown;
         self.takedown.diving = None;
-        self.takedown.run = Some(TakedownRun { target, side, t: 0.0, duration: s.duration, from_eye });
+        self.takedown.run = Some(TakedownRun { kind: TakedownKind::Drop, anim: s.anim, target, side, t: 0.0, duration: s.duration, from_eye });
         ev.drop_assassination = Some((target, side));
         true
+    }
+
+    /// The character under the crosshair, in the assassination's reach, that may be assassinated.
+    fn assassination_target(&self, world: &dyn World) -> Option<u32> {
+        let a = &self.tuning.assassinate;
+        let me = self.swordsman();
+        let reach = self.tuning.melee.reach_for(a.range, a.ray_scale_percent, me.velocity, me.aim);
+        let target = Melee::crosshair(&self.tuning.melee, world, &me, reach)?;
+        world.pawn(target).filter(|p| takedown::can_assassinate(a, p)).map(|_| target)
+    }
+
+    /// The ground assassination: the player stays (standing up), the victim is placed for the
+    /// paired kill of the side the player is on, slow or fast as the pacing has it. Falling, or
+    /// with the world between the player and the victim, it's the plain kill.
+    fn start_assassination(&mut self, world: &dyn World, target: u32, ev: &mut StepEvents) {
+        let Some(info) = world.pawn(target) else { return };
+        let a = self.tuning.assassinate.clone();
+        let side = takedown::side_of(&info, self.pos);
+        let torso = Vec3::new(info.center.x, info.center.y, info.torso_z);
+        let blocked = world.sweep(self.pos, torso, a.probe_extent).is_some_and(|h| !h.is_pawn);
+        let generic = self.state == MotionState::Falling || blocked;
+        let fast = !self.takedown.next_is_slow(&a);
+        let kill = if generic {
+            a.generic.clone()
+        } else if fast {
+            a.fast[side.index()].clone()
+        } else {
+            a.slow[side.index()].clone()
+        };
+        let from_eye = self.camera.eye;
+        if self.crouched {
+            self.set_crouched(world, false);
+        }
+        self.crouch_wanted = self.crouched;
+        let (victim_feet, victim_yaw) = if generic {
+            (Vec3::new(info.center.x, info.center.y, info.floor_z), info.yaw)
+        } else {
+            takedown::victim_placement(self.feet(), self.yaw, &kill)
+        };
+        self.vel = Vec3::ZERO;
+        self.pitch = 0.0;
+        self.state = MotionState::Takedown;
+        let kind = TakedownKind::Assassination { fast, generic };
+        self.takedown.run = Some(TakedownRun { kind, anim: kill.anim, target, side, t: 0.0, duration: kill.duration, from_eye });
+        ev.assassination = Some(Assassination { target, side, fast, generic, victim_feet, victim_yaw });
     }
 
     fn takedown_tick(&mut self, world: &dyn World, dt: f32) {

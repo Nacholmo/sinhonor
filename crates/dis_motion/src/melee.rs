@@ -87,13 +87,18 @@ pub struct MeleeTuning {
 impl MeleeTuning {
     /// The reach: the base range, longer when moving forward fast.
     pub fn reach(&self, velocity: Vec3, forward: Vec3) -> f32 {
+        self.reach_for(self.range, self.ray_scale_percent, velocity, forward)
+    }
+
+    /// The reach of an action with its own range and share of the forward-speed bonus.
+    pub fn reach_for(&self, range: f32, ray_scale_percent: f32, velocity: Vec3, forward: Vec3) -> f32 {
         let along = velocity.dot(forward);
         let speed = if along > self.min_speed_ray_scale {
             1.0 + ((along - self.min_speed_ray_scale) * self.ray_speed_scale).clamp(0.0, self.ray_speed_scale_max)
         } else {
             1.0
         };
-        self.range * ((speed - 1.0) * self.ray_scale_percent + 1.0)
+        range * ((speed - 1.0) * ray_scale_percent + 1.0)
     }
 }
 
@@ -162,8 +167,8 @@ impl Melee {
 
     /// The character under the crosshair: a narrow box swept along the view; if that meets the
     /// world first, a line along the view gets a second chance at a character.
-    pub(crate) fn crosshair(t: &MeleeTuning, world: &dyn World, me: &Swordsman) -> Option<u32> {
-        let end = me.eye + me.aim * t.reach(me.velocity, me.aim);
+    pub(crate) fn crosshair(t: &MeleeTuning, world: &dyn World, me: &Swordsman, reach: f32) -> Option<u32> {
+        let end = me.eye + me.aim * reach;
         let half = Vec3::new(t.crosshair_size, t.crosshair_size, CROSSHAIR_HALF_HEIGHT);
         let hit = world.sweep(me.eye, end, half)?;
         if hit.is_pawn {
@@ -175,7 +180,7 @@ impl Melee {
     /// Starts the next swing: forehand first, then backhand when chained, alternating.
     fn start(&mut self, t: &MeleeTuning, world: &dyn World, me: &Swordsman, queued: bool, ev: &mut Vec<MeleeEvent>) {
         let chain = !me.crouched && (queued || self.last_start.is_some_and(|s| self.clock - s < t.chain_time));
-        let target = Self::crosshair(t, world, me);
+        let target = Self::crosshair(t, world, me, t.reach(me.velocity, me.aim));
         let kills = !me.crouched && target.and_then(|a| world.pawn(a)).is_some_and(|p| p.health <= t.damage);
         let kind = if !chain || !self.last_forehand {
             if kills {

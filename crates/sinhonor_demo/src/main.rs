@@ -17,7 +17,7 @@ use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 use bevy::window::{CursorGrabMode, PrimaryWindow};
 use dis_data::sounds::{Cue, Gait, Sounds, Surface};
 use dis_data::surfaces::Surface as TexSurface;
-use dis_motion::{BlinkEvent, BlinkMode, Input as MotionInput, MantleKind, MeleeEvent, Motion, MotionState, MotionTuning, Reach, StepEvents, World};
+use dis_motion::{Awareness, BlinkEvent, BlinkMode, Input as MotionInput, MantleKind, MeleeEvent, Motion, MotionState, MotionTuning, Reach, StepEvents, World};
 use glam::Affine3A as Affine3AId;
 use std::collections::HashMap;
 use std::f32::consts::{FRAC_PI_2, PI};
@@ -58,8 +58,11 @@ pub struct Sim {
     generation: u32,
     /// A dummy guard's starting health.
     guard_health: f32,
-    /// Guards killed this frame (they topple).
+    /// Guards killed this frame (they topple), and guards moved this frame (feet, yaw).
     frame_kills: Vec<u32>,
+    frame_moves: Vec<(u32, dis_motion::Vec3, f32)>,
+    /// The guards have noticed the player (attacks are sword blows, not assassinations).
+    alert: bool,
 }
 
 /// Game sounds (decoded from the install) and the state that paces them.
@@ -142,10 +145,12 @@ struct Step {
     shot: bool,
     /// Place the player's feet here first (Unreal units).
     teleport: Option<[f32; 3]>,
+    /// Make the guards notice the player (true) or lose them (false) first.
+    alert: Option<bool>,
 }
 
 fn step(name: &'static str, secs: f32, input: MotionInput) -> Step {
-    Step { name, secs, input, view: None, shot: false, teleport: None }
+    Step { name, secs, input, view: None, shot: false, teleport: None, alert: None }
 }
 
 /// Ground and water effects: gravel and puddle footsteps, pool splash, swimming, climbing out.
@@ -183,7 +188,7 @@ fn autopilot_sword_script() -> Vec<Step> {
     let attack = MotionInput { attack: true, ..idle };
     let crouch = MotionInput { crouch: true, ..idle };
     vec![
-        Step { teleport: Some([1650.0, 600.0, 0.0]), view: Some((0.0, -0.1)), shot: true, ..step("facing guard 1", 0.5, idle) },
+        Step { teleport: Some([1650.0, 600.0, 0.0]), view: Some((0.0, -0.1)), shot: true, alert: Some(true), ..step("facing guard 1", 0.5, idle) },
         step("forehand", 0.05, attack),
         Step { shot: true, ..step("forehand blow", 0.25, idle) },
         step("chain", 0.05, attack),
@@ -201,6 +206,27 @@ fn autopilot_sword_script() -> Vec<Step> {
         step("sneak attack", 0.05, attack),
         Step { shot: true, ..step("sneak blow", 0.3, idle) },
         step("flush", 0.8, idle),
+    ]
+}
+
+/// Assassinations: a slow one from behind, then a fast one from the side, and one with a wall in
+/// the way.
+fn autopilot_assassinate_script() -> Vec<Step> {
+    let idle = MotionInput::default();
+    let attack = MotionInput { attack: true, ..idle };
+    vec![
+        // Guard 1 faces -X: come up behind it.
+        Step { teleport: Some([1960.0, 600.0, 0.0]), view: Some((PI, -0.15)), alert: Some(false), shot: true, ..step("behind guard 1", 0.5, idle) },
+        step("assassinate", 0.05, attack),
+        Step { shot: true, ..step("slow kill", 0.5, idle) },
+        Step { shot: true, ..step("slow kill later", 0.8, idle) },
+        step("slow kill done", 1.0, idle),
+        // Guard 2 faces +Y: come from its right (the -X side).
+        Step { teleport: Some([1850.0, -700.0, 0.0]), view: Some((0.0, -0.15)), shot: true, ..step("beside guard 2", 0.5, idle) },
+        step("assassinate 2", 0.05, attack),
+        Step { shot: true, ..step("fast kill", 0.4, idle) },
+        step("fast kill done", 1.2, idle),
+        step("flush", 0.5, idle),
     ]
 }
 
@@ -301,11 +327,12 @@ fn main() {
             }
             "--route" => {
                 // `--route fx` picks the ground/water effects route for --autopilot, `--route drop`
-                // the drop assassinations, `--route sword` the sword.
+                // the drop assassinations, `--route sword` the sword, `--route assassinate` assassinations.
                 match args.next().as_deref() {
                     Some("fx") => autopilot.steps = autopilot_fx_script(),
                     Some("drop") => autopilot.steps = autopilot_drop_script(),
                     Some("sword") => autopilot.steps = autopilot_sword_script(),
+                    Some("assassinate") => autopilot.steps = autopilot_assassinate_script(),
                     _ => {}
                 }
             }
@@ -344,9 +371,15 @@ fn main() {
         }
     };
     // The drop-assassination and sword animations post their own sounds.
-    let played: std::collections::HashSet<String> = dis_motion::Side::ALL
+    let a = &data.assassinate;
+    let played: std::collections::HashSet<String> = data
+        .drop_assassinate
+        .sides
         .iter()
-        .map(|s| hands::drop_clip(*s).to_string())
+        .chain(&a.slow)
+        .chain(&a.fast)
+        .chain([&a.generic])
+        .map(|s| s.anim.clone())
         .chain(data.melee.swings.iter().flatten().flat_map(|s| [Some(&s.swing), s.env_hit.as_ref(), s.env_hit_chain.as_ref()]).flatten().map(|a| a.name.clone()))
         .collect();
     if let Some(vm) = &viewmodel {
@@ -387,6 +420,8 @@ fn main() {
         generation: 0,
         guard_health: data.melee.default_npc_health,
         frame_kills: Vec::new(),
+        frame_moves: Vec::new(),
+        alert: false,
     };
     let sfx = Sfx {
         sounds,
@@ -726,12 +761,20 @@ fn simulate(
         if auto.t == 0.0 {
             if let Some(p) = st.teleport {
                 let (tuning, level) = (sim.tuning.clone(), sim.motion.blink.level);
+                // Keep the takedown pacing (slow and fast kills) across the jump.
+                let mut takedown = std::mem::take(&mut sim.motion.takedown);
+                takedown.run = None;
+                takedown.diving = None;
                 sim.motion = Motion::new(tuning, dis_motion::Vec3::from(p), 0.0);
                 sim.motion.blink.level = level;
+                sim.motion.takedown = takedown;
             }
             if let Some((yaw, pitch)) = st.view {
                 sim.motion.yaw = yaw;
                 sim.motion.pitch = pitch;
+            }
+            if let Some(alert) = st.alert {
+                set_alert(&mut sim, alert);
             }
         }
         input = st.input;
@@ -766,8 +809,15 @@ fn simulate(
         sim.motion.blink.level = level;
         let health = sim.guard_health;
         sim.level = level::build(health);
+        let alert = sim.alert;
+        set_alert(&mut sim, alert);
         sim.generation += 1;
         push_log(&mut sim, "reset".into());
+    }
+    if keys.just_pressed(KeyCode::KeyT) {
+        let alert = !sim.alert;
+        set_alert(&mut sim, alert);
+        push_log(&mut sim, if alert { "the guards have noticed you".into() } else { "the guards lost you".into() });
     }
     if keys.just_pressed(KeyCode::F1) {
         sim.show_help = !sim.show_help;
@@ -795,6 +845,18 @@ fn simulate(
         push_log(&mut sim, format!("landed at {v:.0} uu/s{}", if ev.fall_damage.is_some() { " (fall damage!)" } else { "" }));
     }
     sim.frame_kills.clear();
+    sim.frame_moves.clear();
+    if let Some(a) = ev.assassination {
+        // Paired kills move the victim to the player; then it's dead.
+        if !a.generic {
+            sim.level.world.place_character(a.target, a.victim_feet, a.victim_yaw);
+            sim.frame_moves.push((a.target, a.victim_feet, a.victim_yaw));
+        }
+        sim.level.world.remove_actor(a.target);
+        sim.frame_kills.push(a.target);
+        let pace = if a.generic { "plain" } else if a.fast { "fast" } else { "slow" };
+        push_log(&mut sim, format!("assassination: guard {}, from the {} ({pace})", a.target, format!("{:?}", a.side).to_lowercase()));
+    }
     for e in &ev.melee {
         match e {
             MeleeEvent::Hit { target, damage, .. } => {
@@ -1118,6 +1180,16 @@ fn draw_blink(sim: Res<Sim>, mut gizmos: Gizmos) {
     gizmos.sphere(Isometry3d::from_translation(to_bevy(t.point)), 0.08, color);
 }
 
+/// All guards notice the player, or lose them.
+fn set_alert(sim: &mut Sim, alert: bool) {
+    sim.alert = alert;
+    let awareness = if alert { Awareness::InCombat } else { Awareness::Unaware };
+    let ids: Vec<u32> = sim.level.guards.iter().map(|g| g.actor).collect();
+    for id in ids {
+        sim.level.world.set_awareness(id, awareness);
+    }
+}
+
 fn push_log(sim: &mut Sim, s: String) {
     sim.log.push(s);
     if sim.log.len() > 6 {
@@ -1155,6 +1227,11 @@ fn update_guards(time: Res<Time>, sim: Res<Sim>, mut guards: Query<(&mut GuardBo
         if g.generation != sim.generation {
             g.generation = sim.generation;
             g.fall = None;
+            *tf = g.rest;
+        }
+        if let Some(&(_, feet, yaw)) = sim.frame_moves.iter().find(|(id, ..)| *id == g.actor).filter(|_| g.fall.is_none()) {
+            let center = dis_motion::Vec3::new(feet.x, feet.y, feet.z + g.half.y / SCALE);
+            g.rest = Transform::from_translation(to_bevy(center)).with_rotation(Quat::from_rotation_y(-yaw));
             *tf = g.rest;
         }
         if g.fall.is_none() && sim.frame_kills.contains(&g.actor) {
@@ -1200,7 +1277,7 @@ fn update_camera(
     *tf = Transform::from_translation(eye).looking_to(Vec3::new(dir.x, dir.z, dir.y), Vec3::Y);
     tf.rotate_local_z(-m.camera.roll);
     // A kill animation drives the view; ease into it from where the view was.
-    match (m.takedown.run, hands.as_ref().and_then(|h| h.cam_offset)) {
+    match (m.takedown.run.as_ref(), hands.as_ref().and_then(|h| h.cam_offset)) {
         (Some(run), Some(offset)) => {
             let from = *ease_from.get_or_insert(before);
             let anim = tf.mul_transform(offset);
@@ -1243,7 +1320,7 @@ fn update_hud(sim: Res<Sim>, mut hud: Query<&mut Text, With<Hud>>) {
         MotionState::Swimming => "Swimming",
         MotionState::Ladder => "Ladder",
         MotionState::Blinking => "Blinking",
-        MotionState::Takedown => "Drop assassination",
+        MotionState::Takedown => "Takedown",
     };
     let lvl = &sim.tuning.blink.levels[m.blink.level.min(sim.tuning.blink.levels.len() - 1)];
     let mut s = format!(
@@ -1262,6 +1339,9 @@ fn update_hud(sim: Res<Sim>, mut hud: Query<&mut Text, With<Hud>>) {
     if let Some(r) = &m.melee.run {
         s.push_str(&format!("sword: {:?} ({})\n", r.kind, r.anim.name));
     }
+    if m.takedown.assassinate.is_some() {
+        s.push_str("[LMB] Assassinate\n");
+    }
     match (m.takedown.diving, m.takedown.prompt) {
         (Some(id), _) => s.push_str(&format!("[diving at guard {id}]\n")),
         (None, Some((_, Reach::InRange))) => s.push_str("[LMB] Drop assassination\n"),
@@ -1273,7 +1353,7 @@ fn update_hud(sim: Res<Sim>, mut hud: Query<&mut Text, With<Hud>>) {
     }
     if sim.show_help {
         s.push_str(&format!(
-            "\nWASD move  Mouse look  Space jump/mantle  Ctrl/C crouch (sprint+crouch = slide)\nShift sprint  Alt walk  Q/E lean  RMB/F hold Blink, release to go  1/2 Blink tier\nLMB sword (while falling onto a guard: drop assassination)\nR reset  M mute  G blink gizmos  H hands  F1 help  Esc free cursor / quit\n\nTuning read from {}\n{} warnings; run speed {:.0}, sprint {:.0}, jump {:.0}, gravity {:.0}",
+            "\nWASD move  Mouse look  Space jump/mantle  Ctrl/C crouch (sprint+crouch = slide)\nShift sprint  Alt walk  Q/E lean  RMB/F hold Blink, release to go  1/2 Blink tier\nLMB sword / assassinate unaware guards (falling onto one: drop assassination)  T guards notice you\nR reset  M mute  G blink gizmos  H hands  F1 help  Esc free cursor / quit\n\nTuning read from {}\n{} warnings; run speed {:.0}, sprint {:.0}, jump {:.0}, gravity {:.0}",
             sim.source, sim.warnings, sim.tuning.run_speed, sim.tuning.sprint_speed, sim.tuning.jump_z, sim.tuning.gravity_z
         ));
     }

@@ -6,8 +6,8 @@ It covers player motion (walk, sprint, crouch, jump, fall, slide, mantle, lean, 
 and the **motion powers**: Blink, plus Agility's power jump and fall-damage changes. All of it is packaged to be modded
 into *other* games. This is *not* a full rewrite of Dishonored. AI, general combat, non-motion powers, UI, saves, audio and the
 campaign are out of scope. They appear below only where motion or Blink touches them (for example, blink knockdown damage types).
-Two pieces of combat are in scope because they pair with motion and Blink: the **drop assassination** (§5b) and the
-basic **sword attack** (§5c).
+Some combat is in scope because it pairs with motion and Blink: the **drop assassination** (§5b), the basic **sword
+attack** (§5c) and the **ground assassination** (§5d).
 
 Intended shape (mirrors the mashup's `skate/` subsystem): an engine-agnostic motion and Blink crate that asks the host
 for collision through a trait (sweeps, traces, ledge probes); a data crate that reads tuning, tweaks and animation from
@@ -414,6 +414,55 @@ The kit reports the swing (`Swing`), a hit (`Hit`: target, damage, and whether i
 - The auto look up and down (`m_bDoAutoLookUp`, `m_bDoAutoLookDown`) and the off-hand swipe the power hand plays
   (`m_OffhandSwipeForehand`).
 
+## 5d. Ground assassination: behaviour specification (2026-10-09)
+
+Attacking a character that hasn't noticed the player kills it outright: the stealth kill from behind (or from any side,
+as long as it hasn't seen you). This is the behaviour `crates/dis_motion` implements (`takedown.rs`), written as a
+specification in our own words.
+
+### Data used at runtime
+
+- **Corvo's sword tweak**, class `DisTweaks_Assassinate` under `Twk_Inv_PlayerSpecific.Twk_Inv_SwordCorvo` in
+  `Startup.upk`, over the shared sword tweak and the class defaults of `DisTweaks_ItemContext`, `DisTweaks_MeleeAttack`,
+  `DisTweaks_MeleeAttackPlayer`, `DisTweaks_Finisher` and `DisTweaks_Assassinate`. Fields: `m_fMaxContextRange` (2.75 m),
+  `m_fRayScalePercent` (1.25), `m_Assassination_Generic_ProbeExtents` (20, 20, 40), `m_AssassinateOnAwareness`,
+  `m_bCanAssassinateRunners` (false), and from `DisTweaks_Finisher` `m_NumFinishersBeforeSlow_Min/Max` (4, 8) and
+  `m_fTimeBeforeSlow_Min/Max` (90 s, 120 s).
+- **Awareness** follows the game's `EAIAwareness` order: Unaware, AwareOfPlayer, Surprised, Suspicious, Fearful,
+  InCombat, Begging, Choked. `m_AssassinateOnAwareness[i].m_bAssassinate` says which allow it. For Corvo they are
+  Unaware, Surprised, Suspicious and Begging.
+- **The kills**: `m_AssassinateMoveSets[0]` (humans) pairs Corvo's `Sword_Ready_Assassination_<Side>_Master` (slow) and
+  `..._Fast<Side>_Master` (fast) with the victim's `Generic_Assassination_<Side>_Slave` / `..._Fast<Side>_Slave`, plus a
+  plain `Sword_Ready_Assassination_Generic` with no victim animation. The victims' `anchor_jnt` at the first frame puts
+  Corvo 1.0 to 1.2 m from the victim (slow front 1.2 m, back 1.0 m, sides 1.0 m; fast ones 1.2 m), and Corvo's clips
+  release him at their `DisNotify_AnimStateUnlock` (about 1.7 to 2.0 s slow, 0.9 to 1.1 s fast, 0.35 s plain).
+
+### When it is available
+
+- **The target** is the character under the crosshair, found as for the sword (§5c) but with the assassination's reach:
+  `m_fMaxContextRange`, with `m_fRayScalePercent` of the forward-speed bonus.
+- It may be assassinated when its awareness allows it and it isn't running (unless `m_bCanAssassinateRunners`). The game also allows
+  it in a few other states (apparently a stunned character); the kit leaves those out. **There is no angle test**: an unaware character can be killed from the front too.
+- While it is available, the attack button assassinates instead of swinging.
+
+### The kill
+
+- **Side**: the player's position in the target's frame, as for the drop assassination (§5b).
+- **Slow or fast**: the slow kill is the special one. It plays when the player isn't in a fight and either no fast kills
+  are left, or the slow timer has run out and at least one fast kill has been seen. After a slow kill, the number of
+  fast kills is a random count in `m_NumFinishersBeforeSlow_Min..Max` and the timer a random time in
+  `m_fTimeBeforeSlow_Min..Max`. After a fast kill, the count goes down by one. The first kill is slow.
+- **Plain kill**: if a box of `m_Assassination_Generic_ProbeExtents`, swept from the player to the target's torso through
+  world geometry only, is blocked, or the player is falling, the plain kill is used and the victim stays put.
+- **Placement**: the player is not moved. Unlike the drop kill, the victim is the one placed: it is turned and moved so
+  that its anchor lies on the player, which puts it in front of the player at the anchor's distance. The player stands
+  up, and is held until the clip's unlock notify, with the view following the clip's `camera_jnt` (as in §5b).
+
+### Still open for the ground assassination
+- The bend-time variants (`m_*_BendTimeFrozen_Aware`), the special and dramatic kills of story characters, and the
+  versions while carrying a body (`..._CarryCorpse_Master`).
+- The kit takes "in a fight" (which forces the fast kill) to be never; a host with AI should feed it.
+
 ## 6. Player motion: where the data lives (2026-10-07)
 
 All of this is read at runtime by `crates/dis_data`. Values are not repeated here.
@@ -467,6 +516,7 @@ carrying-corpse variant). The vertical velocity of the base the player stands on
 | Mantle finder and mantle motion | Modelled from the tweak fields and animation lengths; the game's own edge finder is not reproduced. Ledges are world geometry only: characters are never mantled onto |
 | Drop assassination: target search, lock-on dive, side, landing place and hold time | **Follows the game's behaviour** (§5b), with tweak values, anchors and timings read at runtime |
 | Sword: swing choice and chaining, reach, target, blade sweep, environment hits, damage | **Follows the game's behaviour** (§5c); with several characters in one sweep the kit takes the first |
+| Ground assassination: availability, side, slow/fast pacing, plain kill, victim placement, hold time | **Follows the game's behaviour** (§5d), with tweak values, anchors and timings read at runtime |
 | Slide | Speed bleeds from entry speed to crouch speed over `m_fSlideTime`, with a cancel window. Modelled, not exact |
 | Lean, bob, landing dip | Spring and procedural approximations; the game drives bob from `Ply_Nav_LocoCamera_at` (needs the Edge decoder) |
 | Ladder, swim | Simple models using the game's speeds and accelerations |
@@ -642,8 +692,8 @@ format. Formats seen: DXT1, DXT5, ARGB8 and G8. `Textures.tfc` is 1.2 GB, so mip
 ## 7. Status and next steps
 
 Done: `upk` (package, texture reader), `dis_data` (tuning, sound and effect loader), `dis_motion` (motion core and
-Blink, the drop assassination, the sword, tests), `wwise` (sound packages), `cascade` (particle runtime), `edge_anim` (Edge animation decoder), and `sinhonor_demo` (Bevy course with Corvo's animated arms and sword, sounds,
-the game's particle effects, sword fights and drop assassinations on box guards, and `--autopilot` verification routes).
+Blink, the drop and ground assassinations, the sword, tests), `wwise` (sound packages), `cascade` (particle runtime), `edge_anim` (Edge animation decoder), and `sinhonor_demo` (Bevy course with Corvo's animated arms and sword, sounds,
+the game's particle effects, sword fights and drop and ground assassinations on box guards, and `--autopilot` verification routes).
 
 Next:
 1. Match the game's mantle edge finder (`DishonoredMantleEdgeFinderComponent`) more closely,

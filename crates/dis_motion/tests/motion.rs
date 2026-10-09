@@ -94,13 +94,30 @@ fn tuning() -> MotionTuning {
             max_drop_jump_vel: 0.0,
             min_drop_down_vel: 120.0,
             sides: [
-                DropSide { anchor: Vec3::new(55.0, 0.0, 0.0), duration: 2.0 },
-                DropSide { anchor: Vec3::new(0.0, -75.0, 0.0), duration: 2.0 },
-                DropSide { anchor: Vec3::new(0.0, 75.0, 0.0), duration: 2.0 },
-                DropSide { anchor: Vec3::new(-65.0, 0.0, 0.0), duration: 2.0 },
+                DropSide { anchor: Vec3::new(55.0, 0.0, 0.0), duration: 2.0, anim: "Drop".into() },
+                DropSide { anchor: Vec3::new(0.0, -75.0, 0.0), duration: 2.0, anim: "Drop".into() },
+                DropSide { anchor: Vec3::new(0.0, 75.0, 0.0), duration: 2.0, anim: "Drop".into() },
+                DropSide { anchor: Vec3::new(-65.0, 0.0, 0.0), duration: 2.0, anim: "Drop".into() },
             ],
         },
         melee: melee_tuning(),
+        assassinate: assassinate_tuning(),
+    }
+}
+
+fn assassinate_tuning() -> AssassinateTuning {
+    let kill = |anim: &str, x: f32, y: f32, duration: f32| DropSide { anchor: Vec3::new(x, y, 0.0), duration, anim: anim.into() };
+    AssassinateTuning {
+        range: 260.0,
+        ray_scale_percent: 1.0,
+        probe_extent: Vec3::new(15.0, 15.0, 30.0),
+        on_awareness: [true, false, true, true, false, false, false, false],
+        can_assassinate_runners: false,
+        finishers_before_slow: (2, 2),
+        time_before_slow: (60.0, 60.0),
+        slow: [kill("SlowFront", 110.0, 0.0, 1.5), kill("SlowLeft", 0.0, -110.0, 1.5), kill("SlowRight", 0.0, 110.0, 1.5), kill("SlowBack", -110.0, 0.0, 1.5)],
+        fast: [kill("FastFront", 115.0, 0.0, 0.8), kill("FastLeft", 0.0, -115.0, 0.8), kill("FastRight", 0.0, 115.0, 0.8), kill("FastBack", -115.0, 0.0, 0.8)],
+        generic: kill("Generic", 0.0, 0.0, 0.3),
     }
 }
 
@@ -403,23 +420,25 @@ fn drop_assassination_needs_a_clear_line_and_a_fall() {
     assert!(m.takedown.prompt.is_none());
     let ev = m.update(&w, &attack(), 1.0 / 60.0);
     assert!(ev.drop_assassination.is_none() && ev.dove_at.is_none());
-    // On the ground, attacking does nothing.
+    // On the ground, attacking a guard that has seen the player is no takedown.
+    let mut w = guard_world();
+    w.set_awareness(7, Awareness::InCombat);
     let mut m = Motion::new(tuning(), Vec3::new(-100.0, 0.0, 0.0), 0.0);
     run(&mut m, &w, Input::default(), 0.3);
     let ev = m.update(&w, &attack(), 1.0 / 60.0);
-    assert!(ev.drop_assassination.is_none());
+    assert!(ev.drop_assassination.is_none() && ev.assassination.is_none());
     assert_eq!(m.state, MotionState::Walking);
 }
 
 #[test]
 fn drop_assassination_side_follows_the_target_facing() {
-    let guard = PawnInfo { center: Vec3::new(0.0, 0.0, 90.0), floor_z: 0.0, torso_z: 120.0, yaw: std::f32::consts::FRAC_PI_2, health: 25.0 };
+    let guard = PawnInfo { center: Vec3::new(0.0, 0.0, 90.0), floor_z: 0.0, torso_z: 120.0, yaw: std::f32::consts::FRAC_PI_2, health: 25.0, awareness: Awareness::Unaware, running: false };
     // Facing +Y: +Y is its front, +X its left.
     assert_eq!(side_of(&guard, Vec3::new(0.0, 100.0, 300.0)), Side::Front);
     assert_eq!(side_of(&guard, Vec3::new(0.0, -100.0, 300.0)), Side::Back);
     assert_eq!(side_of(&guard, Vec3::new(100.0, 10.0, 300.0)), Side::Left);
     assert_eq!(side_of(&guard, Vec3::new(-100.0, -10.0, 300.0)), Side::Right);
-    let (feet, yaw) = landing(&guard, &DropSide { anchor: Vec3::new(0.0, -75.0, 0.0), duration: 1.0 });
+    let (feet, yaw) = landing(&guard, &DropSide { anchor: Vec3::new(0.0, -75.0, 0.0), duration: 1.0, anim: "Drop".into() });
     assert!((feet - Vec3::new(75.0, 0.0, 0.0)).length() < 0.01, "left anchor {feet:?}");
     assert!(yaw.cos() < -0.999, "faces the guard, yaw {yaw}");
 }
@@ -439,6 +458,13 @@ fn drop_assassination_sweeps_the_players_box() {
 
 fn swings(evs: &[StepEvents]) -> Vec<MeleeEvent> {
     evs.iter().flat_map(|e| e.melee.clone()).collect()
+}
+
+/// A guard that has seen the player (so attacks are sword blows, not assassinations).
+fn alert_guard_world() -> BoxWorld {
+    let mut w = guard_world();
+    w.set_awareness(7, Awareness::InCombat);
+    w
 }
 
 /// Standing 1.5 m from the guard at the origin, facing it.
@@ -476,7 +502,7 @@ fn sword_swings_alternate_and_chain() {
 
 #[test]
 fn sword_hits_the_guard_in_reach_and_finishes_it() {
-    let mut w = guard_world();
+    let mut w = alert_guard_world();
     let mut m = facing_guard(&w);
     assert_eq!(m.melee.target, Some(7));
     let evs = [run(&mut m, &w, attack(), 0.05), run(&mut m, &w, Input::default(), 0.3)].concat();
@@ -503,7 +529,7 @@ fn sword_recoils_off_walls_and_misses_out_of_reach() {
     assert!(matches!(&env[0], MeleeEvent::EnvHit { anim: Some(a), shake, .. } if a == "Forehand_Recoil" && *shake == 150.0));
     assert!(m.melee.run.as_ref().is_some_and(|r| r.recoiled));
     // A guard 3.5 m away is out of reach (2 m, plus the blade box's 50 cm).
-    let w = guard_world();
+    let w = alert_guard_world();
     let mut m = Motion::new(tuning(), Vec3::new(-350.0, 0.0, 0.0), 0.0);
     run(&mut m, &w, Input::default(), 0.3);
     assert_eq!(m.melee.target, None);
@@ -518,11 +544,71 @@ fn sword_reach_grows_with_forward_speed_and_sneak_when_crouched() {
     // At 6 m/s: 1 + (600 - 350) * 0.004 = 2, and half of the bonus applies.
     assert!((t.reach(Vec3::new(600.0, 0.0, 0.0), Vec3::X) - 300.0).abs() < 0.01);
     assert!((t.reach(Vec3::new(5000.0, 0.0, 0.0), Vec3::X) - 200.0 * 1.6).abs() < 0.01);
-    let w = guard_world();
+    let w = alert_guard_world();
     let mut m = facing_guard(&w);
     run(&mut m, &w, Input { crouch: true, ..Default::default() }, 0.05);
     run(&mut m, &w, Input::default(), 0.3);
     assert!(m.crouched);
     let evs = run(&mut m, &w, attack(), 0.05);
     assert!(matches!(swings(&evs)[0], MeleeEvent::Swing { kind: SwingKind::Sneak, .. }));
+}
+
+#[test]
+fn assassination_kills_an_unaware_guard_and_places_it() {
+    let w = guard_world();
+    // Behind the guard (it faces +X), 1.5 m back, facing it.
+    let mut m = facing_guard(&w);
+    assert_eq!(m.takedown.assassinate, Some(7));
+    let ev = m.update(&w, &attack(), 1.0 / 60.0);
+    let a = ev.assassination.expect("assassination");
+    assert_eq!((a.target, a.side, a.fast, a.generic), (7, Side::Back, false, false));
+    assert!(ev.melee.is_empty(), "no swing as well");
+    assert_eq!(m.state, MotionState::Takedown);
+    assert_eq!(m.takedown.run.as_ref().map(|r| r.anim.as_str()), Some("SlowBack"));
+    // The player stays; the victim goes 1.1 m in front of them, turned so they're behind it.
+    assert!((m.pos.x + 150.0).abs() < 1.0, "player stays, x {}", m.pos.x);
+    assert!((a.victim_feet - Vec3::new(-40.0, 0.0, 0.0)).length() < 1.0, "victim at {:?}", a.victim_feet);
+    assert!(a.victim_yaw.cos() > 0.999, "victim faces away, yaw {}", a.victim_yaw);
+    run(&mut m, &w, Input::default(), 1.6);
+    assert_eq!(m.state, MotionState::Walking);
+}
+
+#[test]
+fn assassination_needs_an_unaware_guard_and_paces_slow_and_fast_kills() {
+    // A guard in combat is fought, not assassinated.
+    let w = alert_guard_world();
+    let m = facing_guard(&w);
+    assert_eq!(m.takedown.assassinate, None);
+    // Suspicious still counts; running doesn't.
+    let mut w = guard_world();
+    w.set_awareness(7, Awareness::Suspicious);
+    let m = facing_guard(&w);
+    assert_eq!(m.takedown.assassinate, Some(7));
+    w.characters[0].1.running = true;
+    let m = facing_guard(&w);
+    assert_eq!(m.takedown.assassinate, None);
+    // Slow first, then two fast ones, then slow again (the time limit doesn't apply when the
+    // fast ones run out).
+    let w = guard_world();
+    let mut m = facing_guard(&w);
+    let mut paces = Vec::new();
+    for _ in 0..4 {
+        let ev = m.update(&w, &attack(), 1.0 / 60.0);
+        paces.push(ev.assassination.expect("assassination").fast);
+        run(&mut m, &w, Input::default(), 2.0);
+    }
+    assert_eq!(paces, vec![false, true, true, false]);
+}
+
+#[test]
+fn assassination_is_plain_when_the_world_is_in_the_way() {
+    // A low wall between the player and the guard: room for the blade, not for the pairing.
+    let mut w = guard_world();
+    w.add_box(Vec3::new(-80.0, -100.0, 0.0), Vec3::new(-70.0, 100.0, 140.0));
+    let mut m = facing_guard(&w);
+    let ev = m.update(&w, &attack(), 1.0 / 60.0);
+    let a = ev.assassination.expect("assassination");
+    assert!(a.generic);
+    assert_eq!(a.victim_feet, Vec3::new(0.0, 0.0, 0.0));
+    assert_eq!(m.takedown.run.as_ref().map(|r| r.anim.as_str()), Some("Generic"));
 }

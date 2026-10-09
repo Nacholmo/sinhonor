@@ -7,7 +7,7 @@
 //! so tuning read from the game applies unchanged; hosts convert at the boundary.
 //!
 //! Behaviour sources are documented in `NOTES.md`: Blink follows the behaviour specified in
-//! §5, the drop assassination the one in §5b and the sword attack the one in §5c; walking/falling follow UE3's character physics
+//! §5, the drop assassination §5b, the sword attack §5c and the ground assassination §5d; walking/falling follow UE3's character physics
 //! fed with Dishonored's tuning; mantle, slide, lean, swim and ladder are modelled from the
 //! game's tuning and animation timings.
 
@@ -25,7 +25,7 @@ pub use camera::CameraFeel;
 pub use controller::{Input, MantleKind, Motion, MotionState, StepEvents};
 pub use glam::{Vec2, Vec3};
 pub use melee::{Melee, MeleeEvent, MeleeTuning, SwingAnim, SwingKind, SwingRun, SwingSet, CROSSHAIR_HALF_HEIGHT, SWEEP_HALF_HEIGHT};
-pub use takedown::{landing, side_of, DropAssassinateTuning, DropSide, PawnInfo, Reach, Side, Takedown, TakedownRun, DIVE_SPEED_SCALE};
+pub use takedown::{landing, side_of, victim_placement, AssassinateTuning, Assassination, Awareness, DropAssassinateTuning, DropSide, PawnInfo, Reach, Side, Takedown, TakedownKind, TakedownRun, DIVE_SPEED_SCALE};
 pub use tuning::*;
 
 /// Result of a swept box query.

@@ -2,7 +2,7 @@
 
 Dishonored's first-person movement and Blink in Rust, with a Bevy test course to try them in.
 
-It isn't a rewrite of the game. It's a portable **motion kit**: walk, sprint, crouch, jump, fall, slide, mantle, lean, swim, ladder, Blink, the sword and the drop assassination, built the way [2010-rust-rewrite-mashup](https://github.com/chasmlol/2010-rust-rewrite-mashup) brings Skate 3 into MW2. The movement lives in its own crate, `crates/dis_motion`, which only depends on `glam`. It knows nothing about Bevy, so the same controller can be dropped into any game that can answer a box sweep.
+It isn't a rewrite of the game. It's a portable **motion kit**: walk, sprint, crouch, jump, fall, slide, mantle, lean, swim, ladder, Blink, the sword and the assassinations, built the way [2010-rust-rewrite-mashup](https://github.com/chasmlol/2010-rust-rewrite-mashup) brings Skate 3 into MW2. The movement lives in its own crate, `crates/dis_motion`, which only depends on `glam`. It knows nothing about Bevy, so the same controller can be dropped into any game that can answer a box sweep.
 
 **No game files ship with this repository.** Every number, sound, effect, texture, mesh and animation is read at startup **from your own installed copy** of Dishonored.
 
@@ -32,7 +32,8 @@ On Linux the demo runs natively on Wayland with a real pointer lock. Under X11 t
 | Lean left / right | Q / E |
 | Blink: hold to aim, release to go | Right mouse or F |
 | Blink tier I / II | 1 / 2 |
-| Sword attack (or drop assassination while falling onto a guard) | Left mouse |
+| Sword attack, assassination of an unaware guard, or drop assassination while falling onto one | Left mouse |
+| Make the guards notice you (sword fights) or lose you (assassinations) | T |
 | Mute game sounds | M |
 | Blink debug gizmos (target footprint and ground line) | G |
 | Show or hide Corvo's arms and sword | H |
@@ -81,10 +82,20 @@ Left mouse swings Corvo's sword. It follows the game's behaviour, specified in `
 
 - **Chains**: the first swing is a forehand. Press again within 1 s (`m_fMaxChainAttackTime`) and the next is a backhand, then forehand again. A press during a swing's chain window is kept and starts the next swing as soon as the current one allows. Each swing's timing (when the blade can hit, the chain window, when the next may start, when it ends) comes from its animation's notifies.
 - **Reach**: 2.1 m (`m_fMaxContextRange`), longer when you're moving forward faster than 4 m/s: 3.15 m at a sprint (the player pawn's `m_fRaySpeedScale` settings). The blade is a 1.2 m wide box swept from the camera along your view during the swing's attack zone.
-- **Damage**: 10 per blow (the sword's `m_MeleeDamage`). Guards have 25 health, the game's default for a character, so the third blow kills. When a blow will kill, Corvo plays the finishing swing (`Sword_Ready_Fatality_Generic_*`) instead.
+- **Damage**: 10 per blow (the sword's `m_MeleeDamage`), on guards that have noticed you (press T); unaware ones are assassinated instead. Guards have 25 health, the game's default for a character, so the third blow kills. When a blow will kill, Corvo plays the finishing swing (`Sword_Ready_Fatality_Generic_*`) instead.
 - **Sneak attack**: crouched, Corvo swings his sneak attack (`Sword_Sneak_Attack_Small`).
 - **Walls**: if the blade meets the world before a character, the swing recoils (`..._Big`, or `..._BigChain` mid-chain) and the camera shakes (`m_fCamShake_OnHitEnv`).
 - The HUD shows the targeted guard's health. The swings play their own sounds.
+
+### Assassination
+
+Attack a guard that hasn't noticed you and Corvo kills it outright. It follows the game's behaviour, specified in `NOTES.md` §5d, with the numbers from his sword's `DisTweaks_Assassinate` tweak.
+
+- **Who**: the guard under your crosshair within 2.75 m (`m_fMaxContextRange`), if its awareness allows it: unaware, surprised, suspicious or begging (`m_AssassinateOnAwareness`), and not running. The game has no angle test: from behind is the usual way in, but an unaware guard can be killed from the front too. The HUD shows the prompt.
+- **The side** you're on picks the kill, as for the drop assassination.
+- **Slow or fast**: the first kill is the slow, deliberate one. Then come 4 to 8 fast ones, and at least 90 to 120 s, before the next slow one (`m_NumFinishersBeforeSlow_*`, `m_fTimeBeforeSlow_*`).
+- **The guard is moved, not Corvo**: it is turned and set in front of him where its half of the paired animation puts it (1 to 1.2 m), and Corvo plays his half (`Sword_Ready_Assassination_[Fast]<Side>_Master`) with its sounds and camera motion, held until it releases him.
+- **No room** (a box of `m_Assassination_Generic_ProbeExtents` swept to the guard's torso meets the world) or **falling**: the plain stab (`Sword_Ready_Assassination_Generic`), and the guard stays put.
 
 ### Drop assassination
 
@@ -102,13 +113,13 @@ At startup the demo loads **Corvo's first-person arms, his sword, their textures
 
 | File (under `DishonoredGame/CookedPCConsole`) | What it provides |
 |---|---|
-| `Startup.upk` | Corvo's tweak tree (speeds, jump, mantle, slide, camera), his sword's attack and drop-assassination tweaks and damage, the default character health (`Twk_Pawn_DefaultNPC`), the sword (`Wpn_PlySwords.Wpn_PlySword01`), all 385 first-person animations (`Ply_*`) and their effect notifies, the swimming and lens-drip effects |
+| `Startup.upk` | Corvo's tweak tree (speeds, jump, mantle, slide, camera), his sword's attack, assassination and drop-assassination tweaks and damage, the default character health (`Twk_Pawn_DefaultNPC`), the sword (`Wpn_PlySwords.Wpn_PlySword01`), all 385 first-person animations (`Ply_*`) and their effect notifies, the swimming and lens-drip effects |
 | `Engine.upk` | The arms (`Ply_Player.Skm_Player`) and their textures, engine defaults (floor angle, friction) |
 | `DishonoredGame.upk` | Pawn collision and eye height, `Twk_Blink`, the Blink markers and lens effect, footstep, slide, landing and splash effects, and the cobble, rock and plank textures the test course is dressed with |
 | `Textures.tfc` and the other `.tfc` caches | Texture mips, read by byte range |
 | `Bank_Footsteps.pck`, `Bank_Player.pck`, `Bank_Power_Player.pck`, `Bank_UI_Ingame_Water.pck` | Footsteps per surface and gait, slides, landings, mantles, crouch and stand, fall wind, sprint breath, swim strokes, and Blink's warm-up, cast and fizzle |
 | `Bank_Weapon.pck`, `Bank_Impact.pck` | The sword and impact sounds the drop-assassination and sword animations post |
-| `L_Streets1_P.upk` (or another mission package with the City Watch's animations) | Where each side's drop assassination puts Corvo (the victims' `anchor_jnt`) |
+| `L_Streets1_P.upk` (or another mission package with the City Watch's animations) | Where each side's drop and ground assassination puts Corvo (the victims' `anchor_jnt`) |
 | `../Config/DefaultGame.ini`, `DefaultPlayerState.ini`, `DefaultCamera.ini` | Gravity, lean, swim, FOV, bob and roll |
 
 The movement needs only the tuning. Everything else is optional and skipped with a warning if it's missing.
@@ -116,7 +127,7 @@ The movement needs only the tuning. Everything else is optional and skipped with
 **How the arms work.**
 
 - **Animations**: Dishonored cooks its animations in Sony's Edge format (built for the PS3's SPUs), which is why other UE3 viewers can't play them. `crates/edge_anim` decodes them.
-- **Layers**: a base layer plays the sword hand and body (`Sword_Ready_Idle/Walk/Run/Sprint`, `Sword_Sneak_*`, `Sword_SlideLoop`, `Empty_Swim*`, the mantles, `Sword_Ready_JumpLandSmall`, the sword swings and the drop assassinations). A left-arm layer plays the power hand (`Powers_Idle/Walk/Sprint/Jump`, then `Powers_Cast_Blink_In`, `…_Loop` and `…_Out` around a blink). Changes crossfade over 0.18 s.
+- **Layers**: a base layer plays the sword hand and body (`Sword_Ready_Idle/Walk/Run/Sprint`, `Sword_Sneak_*`, `Sword_SlideLoop`, `Empty_Swim*`, the mantles, `Sword_Ready_JumpLandSmall`, the sword swings and the assassinations). A left-arm layer plays the power hand (`Powers_Idle/Walk/Sprint/Jump`, then `Powers_Cast_Blink_In`, `…_Loop` and `…_Out` around a blink). Changes crossfade over 0.18 s.
 - **Camera bone**: the view is the skeleton's `camera_jnt` bone, so the arms sit exactly where the game puts them at its 75° FOV.
 - **Sword**: held on the `RightHandWpn` socket. It's put away for the unarmed (`Empty_*`) swim animations.
 - **Drawing**: the arms and sword are skinned on the CPU and drawn by a second camera on their own layer, so they never clip into walls.
@@ -135,6 +146,7 @@ The movement needs only the tuning. Everything else is optional and skipped with
 - **Smoke**: the hand smoke is simulated relative to the camera, so it doesn't trail behind you as it does in the game.
 - **Agility** (power jump, double jump) isn't in yet.
 - **Sword**: no impact sounds, sparks or blood yet (they come from the game's contact system). With several guards in one swing the kit hits the nearest, where the game orders them by the swing's direction. Guards don't fight back, so there's no blocking, parrying or sword locks.
+- **Assassinations**: the guards are boxes that topple over (after being moved into place for a ground assassination). No guard model plays its half of the kill, and the bend-time, story-character and carrying-a-body variants aren't in.
 - **Drop assassination**: the guards are boxes that topple over. No guard model plays its half of the kill yet, and the kill animations' blood lens effect isn't shown.
 
 `NOTES.md` §6 has a fidelity table for every part.
@@ -151,7 +163,7 @@ A blockout course dressed with the game's textures (`crates/sinhonor_demo/src/le
 6. **Lean pillars** to peek round.
 7. **Ladder tower**, 6 m up, then **rooftops** with gaps of 8 m, 10 m and 14 m. Tier I clears the first, and the last needs tier II.
 8. **The perch**: an 11 m pillar you can only reach by blinking upward from the rooftops.
-9. **Four dummy guards** (red boxes; the dark band is their front) with 25 health. Blink stops at them, the sword hurts them, and you can drop-assassinate any of them:
+9. **Four dummy guards** (red boxes; the dark band is their front) with 25 health. They start unaware, so attacking one assassinates it; press **T** and they notice you, so the sword fights them instead. Blink stops at them, and you can drop-assassinate any of them:
    - two in the open: blink up beside one and fall onto it;
    - one with its back to the balcony: walk off the edge onto it;
    - one below the first rooftop: walk off the roof, lock on and dive.
@@ -165,7 +177,7 @@ A blockout course dressed with the game's textures (`crates/sinhonor_demo/src/le
 - A `World` implementation. Only one method is required:
   - `sweep(start, end, half)`: move a box along a path and report the first blocking hit (point, normal, and whether it started inside something). A zero `half` is a line trace.
 
-  The others have defaults: `overlaps`, `water` (the water volume at a point), `ladder`, `blink_blocked` (the game's blink-blocking volumes) and `pawn` (a character's centre, floor, torso height, facing and health, for the sword and the drop assassination). Every move is built on these, so any collision a host has will do. `BoxWorld` (axis-aligned boxes) is included.
+  The others have defaults: `overlaps`, `water` (the water volume at a point), `ladder`, `blink_blocked` (the game's blink-blocking volumes) and `pawn` (a character's centre, floor, torso height, facing, health, awareness and whether it's running, for the sword and the assassinations). Every move is built on these, so any collision a host has will do. `BoxWorld` (axis-aligned boxes) is included.
 - An `Input` each frame: move axes, look delta, and jump, crouch, sprint, walk, lean, Blink and attack buttons.
 
 Then:
@@ -177,7 +189,7 @@ let mut motion = Motion::new(MotionTuning::from_game(&data), spawn, yaw);
 let events = motion.update(&world, &input, dt);
 ```
 
-Read back `motion.camera.eye`, `motion.yaw`, `motion.pitch`, `motion.camera.roll` and `motion.camera.fov_deg` for the camera, `motion.state` and `events` for animation and sound, `motion.blink` (mode, target and `fx` screen parameters) for Blink's visuals, and `motion.takedown` (the prompt, the lock-on and the kill under way) plus `events.drop_assassination` to kill the target on your side, and `motion.melee` (the swing playing and the target) plus `events.melee` (swings, hits with their damage, wall strikes) for the sword. Coordinates are Unreal-style: Z up, centimetres. Convert at your boundary.
+Read back `motion.camera.eye`, `motion.yaw`, `motion.pitch`, `motion.camera.roll` and `motion.camera.fov_deg` for the camera, `motion.state` and `events` for animation and sound, `motion.blink` (mode, target and `fx` screen parameters) for Blink's visuals, and `motion.takedown` (the prompt, the lock-on and the kill under way) plus `events.drop_assassination` and `events.assassination` (which also says where to put the victim) to kill the target on your side, and `motion.melee` (the swing playing and the target) plus `events.melee` (swings, hits with their damage, wall strikes) for the sword. Coordinates are Unreal-style: Z up, centimetres. Convert at your boundary.
 
 ## Tests
 
@@ -195,6 +207,7 @@ cargo test --workspace
 - Blink reaching a wall and keeping momentum, staying on the floor when cast crouched, and its squashed-sphere range;
 - swimming at the surface and climbing a ladder;
 - the sword: forehand and backhand chaining, hitting a guard in reach and finishing it with a killing blow, recoiling off a wall, missing out of reach, the reach growing with forward speed, and the sneak attack when crouched;
+- the ground assassination: killing an unaware guard from behind with the victim placed in front, refusing guards in combat or running, slow then fast kills, and the plain kill when the world is in the way;
 - the drop assassination: a kill in reach, the lock-on dive from higher up, the side chosen from the target's facing, the landing place, sweeping Corvo's box, and no target when something is in the way, when rising or on the ground.
 
 One test runs on your install's real tuning when it can find it, and skips otherwise.
@@ -207,7 +220,7 @@ All the tuning is read at runtime by `crates/dis_data`, and `cargo run --release
 - **Pawn defaults** (`DishonoredGame.upk`, `Engine.upk`): collision size, crouch size, step height, eye height, ladder speed, walkable floor angle and friction, from the class default objects.
 - **INI files**: gravity, lean springs, swim strokes, FOV, bob and roll.
 - **Animation lengths** (`Startup.upk`): mantles, slides and landings last as long as the animations that play them.
-- **Behaviour**: Blink's targeting, travel, end and screen effect, and the jump, follow the behaviour specified in `NOTES.md` §5; the drop assassination follows §5b and the sword §5c. No game code, decompiled or otherwise, is in this repository.
+- **Behaviour**: Blink's targeting, travel, end and screen effect, and the jump, follow the behaviour specified in `NOTES.md` §5; the drop assassination follows §5b, the sword §5c and the ground assassination §5d. No game code, decompiled or otherwise, is in this repository.
 
 ## Layout
 
@@ -216,7 +229,7 @@ crates/dis_motion/     the motion kit: engine-agnostic, depends only on glam
   src/controller.rs    the state machine: walk, crouch, jump, fall, slide, mantle, swim, ladder, Blink travel
   src/blink.rs         Blink targeting, range, pull-back, stepping, cooldown and screen parameters
   src/melee.rs         the sword: swing choice and chaining, reach, target, blade sweep, wall recoil
-  src/takedown.rs      drop assassination: target search, lock-on dive, side and landing place
+  src/takedown.rs      drop and ground assassinations: targets, lock-on dive, sides, pacing and placement
   src/camera.rs        eye height, bob, roll, landing dip, lean spring, FOV
   src/collide.rs       collide-and-slide on top of World::sweep
   src/boxworld.rs      a World made of axis-aligned boxes, water, ladders and pawns
@@ -240,16 +253,16 @@ The `examples/` of `upk`, `cascade`, `edge_anim`, `wwise` and `dis_data` are the
 
 ## Screenshot mode
 
-`cargo run --release -p sinhonor_demo -- --autopilot shots` plays a scripted route with no mouse needed: a mantle, a blink, the ladder, the rooftop blink, a slide, a close-up of the Blink marker and the arrival lens effect. It prints the motion state at each checkpoint, saves a PNG of each into `shots/`, and quits. Add `--route fx` for the effects route instead: the Blink marker near and far, mid-travel, gravel, puddle, falling into the pool, swimming and climbing out. `--route drop` plays the three drop assassinations: off the balcony, diving from the rooftop, and blinking up beside a guard. `--route sword` chains three swings into a guard, swings at a wall and makes a sneak attack. It's handy for checking nothing broke after a change.
+`cargo run --release -p sinhonor_demo -- --autopilot shots` plays a scripted route with no mouse needed: a mantle, a blink, the ladder, the rooftop blink, a slide, a close-up of the Blink marker and the arrival lens effect. It prints the motion state at each checkpoint, saves a PNG of each into `shots/`, and quits. Add `--route fx` for the effects route instead: the Blink marker near and far, mid-travel, gravel, puddle, falling into the pool, swimming and climbing out. `--route drop` plays the three drop assassinations: off the balcony, diving from the rooftop, and blinking up beside a guard. `--route sword` chains three swings into a guard, swings at a wall and makes a sneak attack. `--route assassinate` assassinates one guard from behind (slow) and another from the side (fast). It's handy for checking nothing broke after a change.
 
 ## Purpose and scope
 
-sinhonor is an independent, non-commercial research and interoperability project. Its aim is to understand how Dishonored's player movement, Blink, sword and drop assassination feel, and to make that feel usable in other games through original code.
+sinhonor is an independent, non-commercial research and interoperability project. Its aim is to understand how Dishonored's player movement, Blink, sword and assassinations feel, and to make that feel usable in other games through original code.
 
 - **You need your own copy.** It works only with a legitimately purchased install. The demo reads that install on your machine, at runtime.
 - **Nothing from the game is distributed.** This repository contains no game assets, data, configuration, executable code or decompiled code, and none is generated into it. The `.gitignore` is a whitelist so none can be committed by accident.
 - **The game is left untouched.** Nothing here modifies, patches or injects into the installed game or its files. It doesn't run alongside the game, doesn't connect to any online service, and doesn't bypass any copy protection or access control.
-- **The code is original.** The file-format readers are written from public format documentation (credited below and in `NOTES.md`) and from examining the file formats so the data can be read. The movement, Blink, sword and drop-assassination code implements a behaviour specification written in our own words. No code from the game or from other projects' decompilations is used.
+- **The code is original.** The file-format readers are written from public format documentation (credited below and in `NOTES.md`) and from examining the file formats so the data can be read. The movement, Blink, sword and assassination code implements a behaviour specification written in our own words. No code from the game or from other projects' decompilations is used.
 
 Dishonored and its content belong to ZeniMax Media and Arkane Studios. If you hold rights in that content and have a concern about anything here, please open an issue and it will be addressed promptly.
 

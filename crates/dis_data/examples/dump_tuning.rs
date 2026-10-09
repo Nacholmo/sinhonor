@@ -5,7 +5,7 @@ fn main() {
     let t = std::time::Instant::now();
     let data = dis_data::load(&install, Default::default()).expect("load");
     println!("loaded from {} in {:?}", install.display(), t.elapsed());
-    println!("{:#?}\n{:#?}\n{:#?}\n{:#?}", data.player, data.blink, data.drop_assassinate, data.melee);
+    println!("{:#?}\n{:#?}\n{:#?}\n{:#?}\n{:#?}", data.player, data.blink, data.drop_assassinate, data.melee, data.assassinate);
     for w in &data.warnings {
         println!("warning: {w}");
     }

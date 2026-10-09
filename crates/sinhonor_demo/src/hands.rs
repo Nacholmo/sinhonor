@@ -13,7 +13,7 @@ use bevy::render::mesh::{Indices, PrimitiveTopology};
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::render::view::{NoFrustumCulling, RenderLayers};
 use dis_data::viewmodel::{MeshPart, ParticleNotify, SoundNotify, ViewModel};
-use dis_motion::{BlinkMode, MotionState, Side};
+use dis_motion::{BlinkMode, MotionState};
 use edge_anim::Joint;
 use glam::{Mat4, Quat, Vec3 as GVec3};
 
@@ -139,15 +139,6 @@ pub fn posts_own_sounds(clip: &str) -> bool {
     ["Sword_Ready_Assassination", "Sword_Ready_Attack", "Sword_Sneak_Attack", "Sword_Ready_Fatality"].iter().any(|p| clip.starts_with(p))
 }
 
-/// Corvo's first-person animation for a drop assassination from `side`.
-pub fn drop_clip(side: Side) -> &'static str {
-    match side {
-        Side::Front => "Sword_Ready_Assassination_DropFront_Master",
-        Side::Left => "Sword_Ready_Assassination_DropLeft_Master",
-        Side::Right => "Sword_Ready_Assassination_DropRight_Master",
-        Side::Back => "Sword_Ready_Assassination_DropBack_Master",
-    }
-}
 
 #[derive(Component)]
 pub struct ViewmodelLight;
@@ -377,7 +368,7 @@ pub fn update_hands(
         MotionState::Swimming => (if moving { "Empty_SwimN" } else { "Empty_SwimIdle" }, true),
         MotionState::Falling | MotionState::Ladder => ("Sword_Ready_Jump", false),
         MotionState::Blinking => ("Sword_Ready_Idle", true),
-        MotionState::Takedown => (m.takedown.run.map_or("Sword_Ready_Idle", |r| drop_clip(r.side)), false),
+        MotionState::Takedown => (m.takedown.run.as_ref().map_or("Sword_Ready_Idle", |r| r.anim.as_str()), false),
         MotionState::Walking if h.landing > 0.0 => ("Sword_Ready_JumpLandSmall", false),
         MotionState::Walking => match (m.crouched, moving, m.sprinting, speed < 250.0) {
             (true, false, _, _) => ("Sword_Sneak_Idle", true),

@@ -1,7 +1,7 @@
 //! Tuning consumed by the motion core. Filled from the game install by the `dishonored-data`
 //! feature ([`MotionTuning::from_game`]) or by the host from any other source.
 
-use crate::{DropAssassinateTuning, MeleeTuning};
+use crate::{AssassinateTuning, DropAssassinateTuning, MeleeTuning};
 
 #[derive(Clone, Debug)]
 pub struct MotionTuning {
@@ -56,6 +56,7 @@ pub struct MotionTuning {
     pub blink: BlinkTuning,
     pub drop_assassinate: DropAssassinateTuning,
     pub melee: MeleeTuning,
+    pub assassinate: AssassinateTuning,
 }
 
 #[derive(Clone, Debug)]
@@ -162,6 +163,7 @@ impl MotionTuning {
             ledge_grab_min_edge_height: m.ledge_grab_min_edge_height,
             anim_rate: p.mantle_anim_rate,
         };
+        let side = |s: &dis_data::takedown::DropSide| crate::DropSide { anchor: crate::Vec3::from(s.anchor), duration: s.duration, anim: s.anim.clone() };
         MotionTuning {
             gravity_z: p.gravity_z,
             radius: p.collision_radius,
@@ -264,7 +266,22 @@ impl MotionTuning {
                     max_drop_dist: d.max_drop_dist,
                     max_drop_jump_vel: d.max_drop_jump_vel,
                     min_drop_down_vel: d.min_drop_down_vel,
-                    sides: std::array::from_fn(|i| crate::DropSide { anchor: crate::Vec3::from(d.sides[i].anchor), duration: d.sides[i].duration }),
+                    sides: std::array::from_fn(|i| side(&d.sides[i])),
+                }
+            },
+            assassinate: {
+                let a = &g.assassinate;
+                AssassinateTuning {
+                    range: a.range,
+                    ray_scale_percent: a.ray_scale_percent,
+                    probe_extent: crate::Vec3::from(a.probe_extent),
+                    on_awareness: a.on_awareness,
+                    can_assassinate_runners: a.can_assassinate_runners,
+                    finishers_before_slow: a.finishers_before_slow,
+                    time_before_slow: a.time_before_slow,
+                    slow: std::array::from_fn(|i| side(&a.slow[i])),
+                    fast: std::array::from_fn(|i| side(&a.fast[i])),
+                    generic: side(&a.generic),
                 }
             },
             melee: {
