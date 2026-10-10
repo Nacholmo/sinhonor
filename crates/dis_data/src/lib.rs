@@ -44,7 +44,10 @@ pub struct PlayerTuning {
     pub collision_radius: f32,
     pub collision_half_height: f32,
     pub crouch_radius: f32,
+    /// Sneaking (the crouch button): `m_fSneakHeight` on the pawn tweak.
     pub crouch_half_height: f32,
+    /// Crawling through low gaps (the engine crouch): `m_fCrouchHeight` on the pawn tweak.
+    pub crawl_half_height: f32,
     pub max_step_height: f32,
     pub base_eye_height: f32,
     pub max_fall_speed: f32,
@@ -58,6 +61,14 @@ pub struct PlayerTuning {
     pub ground_speed_crouch: f32,
     pub ground_speed_walk: f32,
     pub ground_speed_slow_walk: f32,
+    /// Speed factor with the sword out (`m_SwordUnsheathedSpeedFactor`) and with empty hands
+    /// (`m_SwordSheathedSpeedFactor`).
+    pub sword_speed_factor: f32,
+    pub empty_hand_speed_factor: f32,
+    /// How fast a lower top speed is blended down to (`m_fSpeedBlendDownSpeed`, per second).
+    pub speed_blend_down: f32,
+    /// Movement input thresholds and angles (`DisTweaks_PlayerInput`).
+    pub input: InputTuning,
     pub water_speed: f32,
     pub accel_rate: f32,
     pub strafe_mult_run: f32,
@@ -119,6 +130,21 @@ pub enum JumpStyle {
     HeldPowerFullStop,
     /// Holding jump keeps pushing the player up for a while.
     ContinuousPower,
+}
+
+/// How the movement input picks a gait (`DisTweaks_PlayerInput`).
+#[derive(Clone, Debug)]
+pub struct InputTuning {
+    /// Input magnitude up to which the player slow-walks, and walks.
+    pub slow_walk_threshold: f32,
+    pub walk_threshold: f32,
+    /// Input magnitude needed to keep sprinting.
+    pub stop_sprint_threshold: f32,
+    /// Within this angle of sideways (degrees, forward and backward half) counts as strafing.
+    pub strafe_angle_forward: f32,
+    pub strafe_angle_back: f32,
+    /// Within this angle of straight back counts as backing up.
+    pub backwards_angle: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -272,6 +298,8 @@ impl PlayerTuning {
             "MaxSpeedBeforeFallingDamage" => &mut self.max_speed_before_fall_damage,
             "MaxSpeedBeforeFallingDeath" => &mut self.max_speed_before_fall_death,
             "LandAnimRate" => &mut self.land_anim_rate,
+            "SwordUnsheathedSpeedFactor" => &mut self.sword_speed_factor,
+            "SwordSheathedSpeedFactor" => &mut self.empty_hand_speed_factor,
             "MantleAnimRate" => &mut self.mantle_anim_rate,
             _ => return None,
         })
@@ -485,12 +513,18 @@ pub fn load(install: &Path, difficulty: Difficulty) -> Result<GameData, Error> {
         collision_radius: cx.f("player CollisionRadius", fval(&ppawn_cyl, "CollisionRadius").or(fval(&pawn_cyl, "CollisionRadius")), 30.0),
         collision_half_height: cx.f("pawn CollisionHeight", fval(&ppawn_cyl, "CollisionHeight").or(fval(&pawn_cyl, "CollisionHeight")), 80.0),
         crouch_radius: cx.f("CrouchRadius", pf("CrouchRadius"), 30.0),
-        crouch_half_height: cx.f("CrouchHeight", pf("CrouchHeight"), 40.0),
+        crouch_half_height: cx.f("m_fSneakHeight", fval(&top, "m_fSneakHeight"), 60.0),
+        crawl_half_height: cx.f("m_fCrouchHeight", fval(&top, "m_fCrouchHeight").or(pf("CrouchHeight")), 30.0),
         max_step_height: cx.f("MaxStepHeight", pf("MaxStepHeight"), 30.0),
         base_eye_height: cx.f("BaseEyeHeight", pf("BaseEyeHeight"), 60.0),
         max_fall_speed: cx.f("m_fMaxFallSpeed", ini("DishonoredGame.DishonoredPlayerPawn", "m_fMaxFallSpeed").or(pf("MaxFallSpeed")), 2000.0),
         ladder_speed: cx.f("LadderSpeed", pf("LadderSpeed"), 200.0),
-        walkable_floor_z: cx.f("WalkableFloorZ", pf("WalkableFloorZ").or(fval(&engine_pawn, "WalkableFloorZ")), 0.7),
+        // The pawn tweak's walkable angle replaces the engine's floor limit.
+        walkable_floor_z: cx.f(
+            "m_fMaxWalkableFloorInDegrees",
+            fval(&top, "m_fMaxWalkableFloorInDegrees").map(|d| d.to_radians().cos()).or(pf("WalkableFloorZ")).or(fval(&engine_pawn, "WalkableFloorZ")),
+            0.7,
+        ),
         ground_friction: cx.f("GroundFriction", fval(&phys_vol, "GroundFriction"), 8.0),
         water_friction: cx.f("WaterVolume FluidFriction", fval(&water_vol, "FluidFriction"), 2.0),
 
@@ -499,6 +533,22 @@ pub fn load(install: &Path, difficulty: Difficulty) -> Result<GameData, Error> {
         ground_speed_crouch: cx.f("m_GroundSpeedCrouch", a("m_GroundSpeedCrouch"), 250.0),
         ground_speed_walk: cx.f("m_GroundSpeedWalk", a("m_GroundSpeedWalk"), 200.0),
         ground_speed_slow_walk: cx.f("m_GroundSpeedSlowWalk", a("m_GroundSpeedSlowWalk"), 100.0),
+        sword_speed_factor: cx.f("m_SwordUnsheathedSpeedFactor", a("m_SwordUnsheathedSpeedFactor"), 1.0),
+        empty_hand_speed_factor: cx.f("m_SwordSheathedSpeedFactor", a("m_SwordSheathedSpeedFactor"), 1.0),
+        speed_blend_down: cx.f("m_fSpeedBlendDownSpeed", fval(&top, "m_fSpeedBlendDownSpeed"), 8.0),
+        input: {
+            let defaults = props_at(&game, "Default__DisTweaks_PlayerInput").unwrap_or_default();
+            let inp = merged(&defaults, &props_at(&startup, "Twk_Pawn_DefaultPlayer.Twk_Pawn_PlayerInput").unwrap_or_default());
+            let g = |cx: &mut Ctx, k: &str, d: f32| cx.f(k, fval(&inp, k), d);
+            InputTuning {
+                slow_walk_threshold: g(&mut cx, "m_fSlowWalk_Trigger_Threshold", 0.5),
+                walk_threshold: g(&mut cx, "m_fWalk_Trigger_Threshold", 0.85),
+                stop_sprint_threshold: g(&mut cx, "m_fStopSprint_Threshold", 0.8),
+                strafe_angle_forward: g(&mut cx, "m_fStrafeAngle_Forward", 20.0),
+                strafe_angle_back: g(&mut cx, "m_fStrafeAngle_Back", 50.0),
+                backwards_angle: g(&mut cx, "m_fBackwardsAngle", 40.0),
+            }
+        },
         water_speed: cx.f("m_WaterSpeed", a("m_WaterSpeed"), 400.0),
         accel_rate: cx.f("m_AccelerationRate", a("m_AccelerationRate"), 2000.0),
         strafe_mult_run: cx.f("m_GroundStrafeMultiplierRun", a("m_GroundStrafeMultiplierRun"), 1.0),

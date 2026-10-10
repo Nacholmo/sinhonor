@@ -32,7 +32,8 @@ fn tuning() -> MotionTuning {
         radius: 30.0,
         half_height: 80.0,
         crouch_radius: 30.0,
-        crouch_half_height: 40.0,
+        crouch_half_height: 55.0,
+        crawl_half_height: 30.0,
         max_step_height: 30.0,
         base_eye_height: 70.0,
         walkable_floor_z: 0.7,
@@ -42,6 +43,18 @@ fn tuning() -> MotionTuning {
         sprint_speed: 600.0,
         crouch_speed: 200.0,
         walk_speed: 150.0,
+        slow_walk_speed: 80.0,
+        sword_speed_factor: 1.0,
+        empty_hand_speed_factor: 1.0,
+        speed_blend_down: 10.0,
+        gait: GaitTuning {
+            slow_walk_threshold: 0.4,
+            walk_threshold: 0.8,
+            stop_sprint_threshold: 0.7,
+            strafe_angle_forward_deg: 25.0,
+            strafe_angle_back_deg: 50.0,
+            backwards_angle_deg: 35.0,
+        },
         water_speed: 300.0,
         accel_rate: 2000.0,
         ground_friction: 8.0,
@@ -324,7 +337,7 @@ fn slide_from_sprint_bleeds_to_crouch_speed() {
     assert!(evs.iter().any(|e| e.slid));
     assert_eq!(m.state, MotionState::Sliding);
     assert!(m.crouched);
-    run(&mut m, &w, Input { sprint: true, ..fwd() }, 1.2);
+    run(&mut m, &w, fwd(), 1.2);
     assert_eq!(m.state, MotionState::Walking);
     assert!(m.crouched);
 }
@@ -425,7 +438,8 @@ fn real_install_tuning_drives_motion() {
     let w = floor_world();
     let mut m = Motion::new(t.clone(), Vec3::ZERO, 0.0);
     run(&mut m, &w, fwd(), 1.0);
-    assert!((m.speed_2d() - t.run_speed).abs() < 5.0);
+    // Corvo runs with his sword out.
+    assert!((m.speed_2d() - t.run_speed * t.sword_speed_factor).abs() < 5.0, "speed {}", m.speed_2d());
     run(&mut m, &w, Input::default(), 1.0);
     let x0 = m.pos.x;
     run(&mut m, &w, Input { blink: true, ..Default::default() }, 0.2);
@@ -764,7 +778,7 @@ fn mantle_needs_a_facing_wall_and_crouches_under_a_low_roof() {
     // A roof over the top leaves only crouching room: a crouched player finds the edge, and
     // stays crouched on top.
     let mut w = wall_world(120.0);
-    w.add_box(Vec3::new(100.0, -500.0, 220.0), Vec3::new(500.0, 500.0, 300.0));
+    w.add_box(Vec3::new(100.0, -500.0, 260.0), Vec3::new(500.0, 500.0, 340.0));
     let (mut m, evs) = mantle_at(&w, 0.0, true);
     assert_eq!(evs.iter().find_map(|e| e.mantled), Some(MantleKind::Medium));
     run(&mut m, &w, Input::default(), 1.0);
@@ -856,4 +870,69 @@ fn lean_swings_the_head_out_on_its_lever_and_holds_the_view() {
     // Let go: the spring brings the head home.
     run(&mut m, &w, Input::default(), 1.5);
     assert!((m.camera.eye.y - rest.y).abs() < 1.0, "back to {}", m.camera.eye.y - rest.y);
+}
+
+/// Top speed reached holding `input` for a while on open floor.
+fn top_speed(t: MotionTuning, input: Input) -> f32 {
+    let w = floor_world();
+    let mut m = Motion::new(t, Vec3::ZERO, 0.0);
+    run(&mut m, &w, Input::default(), 0.2);
+    run(&mut m, &w, input, 1.5);
+    m.speed_2d()
+}
+
+#[test]
+fn gait_follows_the_input_angle_and_strength() {
+    let t = tuning();
+    let at = |x: f32, y: f32| top_speed(tuning(), Input { move_axis: Vec2::new(x, y), ..Default::default() });
+    let d = std::f32::consts::FRAC_1_SQRT_2;
+    // Straight ahead, and the forward diagonal (outside the forward strafe angle): full run speed.
+    assert!((at(0.0, 1.0) - t.run_speed).abs() < 2.0);
+    assert!((at(d, d) - t.run_speed).abs() < 2.0, "forward diagonal {}", at(d, d));
+    // Sideways, and the back diagonal (inside the backward strafe angle): the strafe factor.
+    assert!((at(1.0, 0.0) - t.run_speed * t.strafe_mult_run).abs() < 2.0);
+    assert!((at(d, -d) - t.run_speed * t.strafe_mult_run).abs() < 2.0, "back diagonal {}", at(d, -d));
+    // Straight back: the backward factor.
+    assert!((at(0.0, -1.0) - t.run_speed * t.backward_mult_run).abs() < 2.0);
+    // A light push walks, a lighter one slow-walks, whatever the direction.
+    assert!((at(0.0, 0.6) - t.walk_speed).abs() < 2.0);
+    assert!((at(-0.3, 0.0) - t.slow_walk_speed).abs() < 2.0);
+    // Sprinting backwards uses the sprint's own factor.
+    let back_sprint = top_speed(tuning(), Input { move_axis: Vec2::new(0.0, -1.0), sprint: true, ..Default::default() });
+    assert!((back_sprint - t.sprint_speed * t.backward_mult_sprint).abs() < 2.0, "back sprint {back_sprint}");
+    // The sword in hand slows every gait.
+    let mut slow = tuning();
+    slow.sword_speed_factor = 0.75;
+    assert!((top_speed(slow, fwd()) - t.run_speed * 0.75).abs() < 2.0);
+}
+
+#[test]
+fn top_speed_falls_smoothly_and_braking_stops_dead() {
+    let w = floor_world();
+    let t = tuning();
+    let mut m = Motion::new(tuning(), Vec3::ZERO, 0.0);
+    run(&mut m, &w, Input { sprint: true, ..fwd() }, 1.5);
+    assert!((m.speed_2d() - t.sprint_speed).abs() < 2.0);
+    // Letting go of sprint: the cap comes down over a few frames, not at once.
+    run(&mut m, &w, fwd(), 0.05);
+    assert!(m.speed_2d() > t.run_speed + 100.0, "still fast: {}", m.speed_2d());
+    run(&mut m, &w, fwd(), 1.0);
+    assert!((m.speed_2d() - t.run_speed).abs() < 2.0);
+    // No input: braking brings it to a dead stop.
+    run(&mut m, &w, Input::default(), 0.5);
+    assert_eq!(m.speed_2d(), 0.0);
+}
+
+#[test]
+fn crawls_under_gaps_too_low_to_sneak_through() {
+    // A slab 80 above the floor: too low for the sneaking box, fine for the crawling one.
+    let mut w = floor_world();
+    w.add_box(Vec3::new(200.0, -500.0, 80.0), Vec3::new(600.0, 500.0, 400.0));
+    let mut m = Motion::new(tuning(), Vec3::ZERO, 0.0);
+    run(&mut m, &w, Input::default(), 0.2);
+    run(&mut m, &w, fwd(), 1.0);
+    assert!(m.crouched && m.crawling, "crawling under the slab at x {}", m.pos.x);
+    assert!(m.pos.x > 230.0, "made it under, x {}", m.pos.x);
+    run(&mut m, &w, fwd(), 2.0);
+    assert!(!m.crouched && !m.crawling, "up again past it, x {}", m.pos.x);
 }

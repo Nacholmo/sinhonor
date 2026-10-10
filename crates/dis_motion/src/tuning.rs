@@ -9,7 +9,10 @@ pub struct MotionTuning {
     pub radius: f32,
     pub half_height: f32,
     pub crouch_radius: f32,
+    /// Sneaking (the crouch button).
     pub crouch_half_height: f32,
+    /// Crawling through gaps too low to sneak through.
+    pub crawl_half_height: f32,
     pub max_step_height: f32,
     /// Eye height above the cylinder centre when standing.
     pub base_eye_height: f32,
@@ -21,6 +24,13 @@ pub struct MotionTuning {
     pub sprint_speed: f32,
     pub crouch_speed: f32,
     pub walk_speed: f32,
+    pub slow_walk_speed: f32,
+    /// Speed factor with the sword out, and with empty hands.
+    pub sword_speed_factor: f32,
+    pub empty_hand_speed_factor: f32,
+    /// How fast a lower top speed is blended down to (per second); higher ones apply at once.
+    pub speed_blend_down: f32,
+    pub gait: GaitTuning,
     pub water_speed: f32,
     pub accel_rate: f32,
     pub ground_friction: f32,
@@ -63,6 +73,21 @@ pub struct MotionTuning {
     pub drop_assassinate: DropAssassinateTuning,
     pub melee: MeleeTuning,
     pub assassinate: AssassinateTuning,
+}
+
+/// How the movement input picks a gait (`NOTES.md` §6).
+#[derive(Clone, Debug)]
+pub struct GaitTuning {
+    /// Input magnitude up to which the player slow-walks, and walks.
+    pub slow_walk_threshold: f32,
+    pub walk_threshold: f32,
+    /// Input magnitude needed to sprint.
+    pub stop_sprint_threshold: f32,
+    /// Within this angle of sideways counts as strafing (moving forward, moving back).
+    pub strafe_angle_forward_deg: f32,
+    pub strafe_angle_back_deg: f32,
+    /// Within this angle of straight back counts as backing up.
+    pub backwards_angle_deg: f32,
 }
 
 /// How the jump button can lift a jump further, in the game's order of jump styles.
@@ -226,6 +251,7 @@ impl MotionTuning {
             half_height: p.collision_half_height,
             crouch_radius: p.crouch_radius,
             crouch_half_height: p.crouch_half_height,
+            crawl_half_height: p.crawl_half_height,
             max_step_height: p.max_step_height,
             base_eye_height: p.base_eye_height,
             walkable_floor_z: p.walkable_floor_z,
@@ -235,6 +261,18 @@ impl MotionTuning {
             sprint_speed: p.ground_speed_sprint,
             crouch_speed: p.ground_speed_crouch,
             walk_speed: p.ground_speed_walk,
+            slow_walk_speed: p.ground_speed_slow_walk,
+            sword_speed_factor: p.sword_speed_factor,
+            empty_hand_speed_factor: p.empty_hand_speed_factor,
+            speed_blend_down: p.speed_blend_down,
+            gait: GaitTuning {
+                slow_walk_threshold: p.input.slow_walk_threshold,
+                walk_threshold: p.input.walk_threshold,
+                stop_sprint_threshold: p.input.stop_sprint_threshold,
+                strafe_angle_forward_deg: p.input.strafe_angle_forward,
+                strafe_angle_back_deg: p.input.strafe_angle_back,
+                backwards_angle_deg: p.input.backwards_angle,
+            },
             water_speed: p.water_speed,
             accel_rate: p.accel_rate,
             ground_friction: p.ground_friction,

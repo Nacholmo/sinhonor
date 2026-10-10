@@ -15,6 +15,10 @@ const MAX_SUBSTEP: f32 = 1.0 / 90.0;
 const FLOOR_SNAP: f32 = 4.0;
 /// How long jump must have been held, at the top of a jump, for the fixed power jump (game constant).
 pub const POWER_JUMP_MIN_HOLD: f32 = 0.05;
+/// Braking is applied in steps of at most this long (engine constant).
+const BRAKE_STEP: f32 = 0.03;
+/// Braking below this speed stops dead (engine constant).
+const BRAKE_STOP_SPEED: f32 = 12.7;
 /// Pulling back further than this cancels a slide (game constant).
 const SLIDE_CANCEL_BACK: f32 = -0.8;
 /// How long the turn and slide to a mantle's start take (the game's default animation blend).
@@ -160,7 +164,13 @@ pub struct Motion {
     pub pitch: f32,
     pub state: MotionState,
     pub crouched: bool,
+    /// Crouched low through a gap too low to sneak through (only while crouched).
+    pub crawling: bool,
     pub sprinting: bool,
+    /// The sword is in hand (the player moves a little slower); false for empty hands.
+    pub sword_out: bool,
+    /// The current top-speed factor, which falls smoothly and rises at once.
+    pub speed_factor: f32,
     pub blink: Blink,
     pub camera: CameraFeel,
     pub floor_normal: Option<Vec3>,
@@ -191,7 +201,10 @@ impl Motion {
             pitch: 0.0,
             state: MotionState::Falling,
             crouched: false,
+            crawling: false,
             sprinting: false,
+            sword_out: true,
+            speed_factor: 1.0,
             blink: Blink::default(),
             camera: CameraFeel::default(),
             floor_normal: None,
@@ -213,11 +226,18 @@ impl Motion {
     }
 
     pub fn half(&self) -> Vec3 {
-        Self::half_for(&self.tuning, self.crouched)
+        Self::half_of(&self.tuning, self.crouched, self.crawling)
     }
 
     fn half_for(t: &MotionTuning, crouched: bool) -> Vec3 {
-        if crouched {
+        Self::half_of(t, crouched, false)
+    }
+
+    /// Standing, sneaking (crouched) or crawling (crouched low under something).
+    fn half_of(t: &MotionTuning, crouched: bool, crawling: bool) -> Vec3 {
+        if crouched && crawling {
+            Vec3::new(t.crouch_radius, t.crouch_radius, t.crawl_half_height)
+        } else if crouched {
             Vec3::new(t.crouch_radius, t.crouch_radius, t.crouch_half_height)
         } else {
             Vec3::new(t.radius, t.radius, t.half_height)
@@ -228,12 +248,12 @@ impl Motion {
         self.pos - Vec3::Z * self.half().z
     }
 
-    /// Eye height above the box centre for the current stance (same feet-relative ratio as standing).
+    /// Eye height above the box centre for a stance (same feet-relative ratio as standing).
     fn eye_height_for(&self, crouched: bool) -> f32 {
         let t = &self.tuning;
         let stand_eye_from_feet = t.half_height + t.base_eye_height;
         let ratio = stand_eye_from_feet / (2.0 * t.half_height);
-        let h = if crouched { t.crouch_half_height } else { t.half_height };
+        let h = Self::half_of(t, crouched, crouched && self.crawling).z;
         2.0 * h * ratio - h
     }
 
@@ -402,7 +422,9 @@ impl Motion {
                 self.auto_crouched = false;
             }
         }
-        if self.state != MotionState::Sliding && self.crouch_wanted != self.crouched && !self.auto_crouched {
+        // Stance changes wait for the moves that own the body to finish.
+        let settled = !matches!(self.state, MotionState::Sliding | MotionState::Mantling | MotionState::Blinking | MotionState::Takedown);
+        if settled && self.crouch_wanted != self.crouched && !self.auto_crouched {
             self.set_crouched(world, self.crouch_wanted);
         }
 
@@ -430,79 +452,136 @@ impl Motion {
 
     /// Changes stance, keeping the feet in place. Standing up only happens if there's room.
     fn set_crouched(&mut self, world: &dyn World, crouch: bool) -> bool {
-        if crouch == self.crouched {
+        if crouch == self.crouched && !(crouch && self.crawling) {
             return true;
         }
-        let t = &self.tuning;
-        let dh = t.half_height - t.crouch_half_height;
-        if crouch {
-            self.pos.z -= dh;
-            self.crouched = true;
-            true
-        } else {
-            let stand = self.pos + Vec3::Z * dh;
-            if world.overlaps(stand, Self::half_for(t, false)) {
-                return false;
-            }
-            self.pos = stand;
-            self.crouched = false;
-            true
-        }
+        self.set_stance(world, crouch, false) || (crouch && self.crouched)
     }
 
-    // ----------------------------------------------------------------- walking
+    /// Sets the stance if there's room for it, keeping the feet in place.
+    fn set_stance(&mut self, world: &dyn World, crouched: bool, crawling: bool) -> bool {
+        let from = self.half();
+        let to = Self::half_of(&self.tuning, crouched, crawling);
+        let centre = Vec3::new(self.pos.x, self.pos.y, self.pos.z - from.z + to.z);
+        if to.z > from.z && world.overlaps(centre, to) {
+            return false;
+        }
+        self.pos = centre;
+        self.crouched = crouched;
+        self.crawling = crouched && crawling;
+        true
+    }
 
+    /// The wished direction and the gait's top-speed factor (of the run speed), as the game picks
+    /// them (`NOTES.md` §6): walking for a light input, sprinting, sneaking, and the strafe and
+    /// backward factors when the input points within their angles. The sword in hand slows it all.
     fn wish(&self, input: &Input) -> (Vec3, f32) {
         let t = &self.tuning;
-        let mut axis = input.move_axis;
-        if axis.length() > 1.0 {
-            axis = axis.normalize();
-        }
+        let g = &t.gait;
+        let axis = input.move_axis;
+        let mag = axis.length().min(1.0);
         let (fwd, right) = yaw_axes(self.yaw);
         let dir = (fwd * axis.y + right * axis.x).normalize_or_zero();
-        let (base, strafe, back) = if self.crouched {
-            (t.crouch_speed, t.strafe_mult_sneak, t.backward_mult_sneak)
-        } else if input.walk {
-            (t.walk_speed, t.strafe_mult_run, t.backward_mult_run)
+        if mag <= 1e-4 {
+            return (Vec3::ZERO, 0.0);
+        }
+        let run = t.run_speed.max(1.0);
+        let walking = !self.sprinting && (input.walk || mag <= g.walk_threshold);
+        let walk_factor = if !input.walk && mag <= g.slow_walk_threshold { t.slow_walk_speed } else { t.walk_speed } / run;
+        // The input's angle: within the strafe angle of sideways, or the backwards angle of back.
+        let (side, ahead) = (axis.x.abs() / axis.length(), axis.y / axis.length());
+        let backing = ahead < 0.0;
+        let strafe_limit = if backing { g.strafe_angle_back_deg } else { g.strafe_angle_forward_deg };
+        let strafing = !walking && side.clamp(-1.0, 1.0).acos().to_degrees() < strafe_limit;
+        let backward = !walking && !strafing && backing && ahead.abs().clamp(-1.0, 1.0).acos().to_degrees() < g.backwards_angle_deg;
+        let factor = if self.crouched {
+            t.crouch_speed / run
         } else if self.sprinting {
-            (t.sprint_speed, t.strafe_mult_sprint, t.backward_mult_sprint)
+            t.sprint_speed / run
+                * if strafing {
+                    t.strafe_mult_sprint
+                } else if backward {
+                    t.backward_mult_sprint
+                } else {
+                    1.0
+                }
+        } else if strafing {
+            t.strafe_mult_run
+        } else if backward {
+            t.backward_mult_run
+        } else if walking {
+            walk_factor
         } else {
-            (t.run_speed, t.strafe_mult_run, t.backward_mult_run)
+            1.0
         };
-        // Direction-dependent max speed: an ellipse through forward (1), side (strafe) and back.
-        let a = axis.normalize_or_zero();
-        let along = if a.y >= 0.0 { 1.0 } else { back };
-        let mult = if a == Vec2::ZERO { 0.0 } else { 1.0 / ((a.x / strafe).powi(2) + (a.y / along).powi(2)).sqrt() };
-        (dir, base * mult * axis.length())
+        let hands = if self.sword_out { t.sword_speed_factor } else { t.empty_hand_speed_factor };
+        (dir, factor * hands)
     }
 
-    /// UE3 `CalcVelocity`: friction toward the wished direction, acceleration, speed cap.
-    fn calc_velocity(&mut self, dir: Vec3, max_speed: f32, accel_scale: f32, friction: f32, dt: f32) {
-        let t = &self.tuning;
+    /// Moves the top-speed factor toward `target`: down smoothly, up at once.
+    fn blend_speed_factor(&mut self, target: f32, dt: f32) -> f32 {
+        let k = (dt * self.tuning.speed_blend_down).clamp(0.0, 1.0);
+        self.speed_factor = if target < self.speed_factor && self.speed_factor - target > 1e-4 {
+            self.speed_factor + (target - self.speed_factor) * k
+        } else {
+            target
+        };
+        self.speed_factor
+    }
+
+    /// UE3 `CalcVelocity` on the ground: with no input, braking; otherwise friction turns the
+    /// velocity toward the input while it accelerates; then the speed cap.
+    fn calc_velocity(&mut self, dir: Vec3, max_speed: f32, max_accel: f32, friction: f32, dt: f32) {
         let mut v = self.vel.truncate();
         let d = dir.truncate();
-        if d == Vec2::ZERO || max_speed <= 0.0 {
-            let speed = v.length();
-            let new = (speed - speed * 2.0 * friction * dt).max(0.0);
-            v = if speed > 0.0 { v * (new / speed) } else { v };
+        if d == Vec2::ZERO || max_accel <= 0.0 {
+            v = Self::brake(v, friction, dt);
         } else {
             let speed = v.length();
-            v -= (v - d * speed) * (dt * friction).min(1.0);
-            v += d * t.accel_rate * accel_scale * dt;
-            let cap = max_speed.max(if accel_scale < 1.0 { speed } else { 0.0 });
-            if v.length() > cap {
-                v = v.normalize() * cap;
-            }
+            v -= (v - d * speed) * dt * friction;
+            v += d * max_accel * dt;
+        }
+        if v.length() > max_speed {
+            v = v.normalize_or_zero() * max_speed;
         }
         self.vel.x = v.x;
         self.vel.y = v.y;
     }
 
+    /// UE3 braking: the velocity decays at twice the friction in steps of at most 0.03 s, and the
+    /// result is the average over the frame; reversing or crawling to a near stop stops it dead.
+    fn brake(v: Vec2, friction: f32, dt: f32) -> Vec2 {
+        if v == Vec2::ZERO || dt <= 0.0 {
+            return v;
+        }
+        let old = v;
+        let (mut cur, mut avg, mut left) = (v, Vec2::ZERO, dt);
+        while left > 0.0 {
+            let step = left.min(BRAKE_STEP);
+            cur -= cur * 2.0 * step * friction;
+            left -= step;
+            if cur.dot(old) > 0.0 {
+                avg += cur * (step / dt);
+            }
+        }
+        if avg.dot(old) < 0.0 || avg.length_squared() < BRAKE_STOP_SPEED * BRAKE_STOP_SPEED {
+            Vec2::ZERO
+        } else {
+            avg
+        }
+    }
+
     fn walk(&mut self, world: &dyn World, input: &Input, prev: &Input, dt: f32, ev: &mut StepEvents) {
         let t = self.tuning.clone();
-        self.sprinting = input.sprint && input.move_axis.y > 0.1 && !self.crouched;
+        // Sprinting needs a firm push, in any direction; it ends sneaking.
+        let firm = input.move_axis.length() > t.gait.stop_sprint_threshold;
+        if input.sprint && firm && self.crouched && !self.crawling && !self.auto_crouched {
+            self.crouch_wanted = false;
+        }
+        self.sprinting = input.sprint && firm && !self.crouched;
         let leaning = input.lean != 0.0 && self.speed_2d() < 50.0;
-        let (dir, max_speed) = if leaning { (Vec3::ZERO, 0.0) } else { self.wish(input) };
+        let (dir, target) = if leaning { (Vec3::ZERO, 0.0) } else { self.wish(input) };
+        let factor = self.blend_speed_factor(target, dt);
 
         // Ladder: walking into one starts climbing.
         if let Some(l) = world.ladder(self.pos, self.half()) {
@@ -529,35 +608,34 @@ impl Motion {
         }
 
         self.auto_crouch(world, dir);
-        self.calc_velocity(dir, max_speed, 1.0, t.ground_friction, dt);
+        self.calc_velocity(dir, t.run_speed * factor, t.accel_rate * factor, t.ground_friction, dt);
         self.vel.z = 0.0;
         self.ground_move(world, dt);
     }
 
-    /// Crouches automatically in front of gaps only a crouched player fits through, and stands
-    /// back up once the way ahead no longer needs it.
+    /// Crawls automatically into gaps too low to stand or sneak through (`m_fAutoCrouchTestDistance`
+    /// ahead), and gets back up once the way ahead no longer needs it.
     fn auto_crouch(&mut self, world: &dyn World, dir: Vec3) {
         let t = &self.tuning;
-        let stand_half = Self::half_for(t, false);
-        let crouch_half = Self::half_for(t, true);
+        let want = Self::half_of(t, self.crouch_wanted, false);
+        let crawl = Self::half_of(t, true, true);
         let feet = self.feet();
-        let stand_center = feet + Vec3::Z * (stand_half.z + 0.01);
-        let crouch_center = feet + Vec3::Z * (crouch_half.z + 0.01);
         let look = if dir == Vec3::ZERO { yaw_axes(self.yaw).0 } else { dir };
         let probe = look * t.auto_crouch_test_distance;
-        let needs_crouch = world.sweep(stand_center, stand_center + probe, stand_half).is_some_and(|h| h.normal.z.abs() < 0.3)
-            && world.sweep(crouch_center, crouch_center + probe, crouch_half).is_none();
-        if self.crouched {
-            if self.auto_crouched && !self.crouch_wanted && !needs_crouch && self.set_crouched(world, false) {
+        let sweep = |h: Vec3| {
+            let c = feet + Vec3::Z * (h.z + 0.01);
+            world.sweep(c, c + probe, h)
+        };
+        let needs_crawl = sweep(want).is_some_and(|h| h.normal.z.abs() < 0.3) && sweep(crawl).is_none();
+        if self.crawling {
+            if !needs_crawl && self.set_stance(world, self.crouch_wanted, false) {
                 self.auto_crouched = false;
             }
-        } else if needs_crouch && dir != Vec3::ZERO {
-            self.set_crouched(world, true);
+        } else if needs_crawl && dir != Vec3::ZERO && self.set_stance(world, true, true) {
             self.auto_crouched = true;
         }
     }
 
-    /// Horizontal move with step-up and floor following; switches to falling off ledges.
     fn ground_move(&mut self, world: &dyn World, dt: f32) {
         let t = self.tuning.clone();
         let half = self.half();
@@ -666,7 +744,8 @@ impl Motion {
     fn fall(&mut self, world: &dyn World, input: &Input, dt: f32, ev: &mut StepEvents) {
         self.jump_tick(input, dt, ev);
         let t = self.tuning.clone();
-        let (dir, max_speed) = self.wish(input);
+        let (dir, factor) = self.wish(input);
+        let max_speed = t.run_speed * factor;
         // Air control: a fraction of ground acceleration, never adding speed past the cap.
         let before = self.speed_2d();
         if dir != Vec3::ZERO {
@@ -764,7 +843,7 @@ impl Motion {
         }
         let run = &self.slide;
         if run.free {
-            self.calc_velocity(Vec3::ZERO, t.crouch_speed, 1.0, t.ground_friction, dt);
+            self.calc_velocity(Vec3::ZERO, t.crouch_speed, 0.0, t.ground_friction, dt);
         } else {
             let ease = (1.0 - (frac * std::f32::consts::PI).cos()) * 0.5;
             let v = run.start + (run.target - run.start) * ease;
@@ -913,11 +992,9 @@ impl Motion {
             self.crouched = true;
             self.crouch_wanted = true;
         }
-        let half = self.half();
-        let from = feet + Vec3::Z * half.z;
         self.mantle = MantleRun {
-            from,
-            start: spot.start_feet + Vec3::Z * half.z,
+            from: feet,
+            start: spot.start_feet,
             yaw_turn: (spot.yaw - self.yaw + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI,
             rise: spot.edge_height,
             over: spot.over,
@@ -926,7 +1003,7 @@ impl Motion {
             elapsed: 0.0,
             rate: m.anim_rate.max(0.01),
         };
-        self.pos = from;
+        self.pos = feet + Vec3::Z * self.half().z;
         self.vel = Vec3::ZERO;
         self.state = MotionState::Mantling;
     }
@@ -962,7 +1039,8 @@ impl Motion {
         // Over the edge by the animation's travel, at least as far as the finder stepped.
         let over = run.over.with_z(0.0);
         let along = over.normalize_or_zero() * fwd_total.max(over.length());
-        self.pos = run.from + (run.start - run.from) * intro + Vec3::Z * (run.rise * rise) + along * fwd;
+        let feet = run.from + (run.start - run.from) * intro + Vec3::Z * (run.rise * rise) + along * fwd;
+        self.pos = feet + Vec3::Z * Self::half_of(&self.tuning, self.crouched, self.crawling).z;
 
         if run.t >= exit {
             // Out of anything the climb ended inside, back toward the edge.

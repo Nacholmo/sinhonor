@@ -76,8 +76,8 @@ apply to anything copied.
   (An earlier guess in this file, that the logic was UnrealScript bytecode, was wrong.)
 - **Movement.** Also **native**. `StatePlayerMaster{Walk,Jump,Falling,Mantle,Climb,Base,...}`,
   `DishonoredNativeStateMachine`, `DishonoredActivePowerComponent` and `DishonoredPowersComponent` have no script
-  functions. On top of UE3's native `PHYS_Walking/Falling` there is a custom "LocoNew" walking path
-  (`execLocoNewPhysWalking` in the cheat manager). About 1,100 functions exist in the whole game script package, out of
+  functions. The player walks with UE3's native `PHYS_Walking`; Dishonored decides what goes into it (§5h). The
+  "LocoNew" console commands in the cheat manager do nothing in the shipped game. About 1,100 functions exist in the whole game script package, out of
   30k exports. Script is mostly data and glue; the gameplay rules are in `Dishonored.exe`.
 - **Animation.** Cooked `UAnimSequence`s store a **Sony Edge Animation** blob (PS3 SPU format, tag `"50AE"`,
   compression format id 7), and every `USkeletalMesh` carries an Edge skeleton blob (tag `"30SE"`). Joint *i* of the Edge
@@ -651,6 +651,70 @@ The slide and the lean, as `crates/dis_motion` implements them (`controller.rs` 
 - `m_SwordUnsheathedSpeedFactor` (0.9 for Corvo) scales the slide's target speed while the sword is out; it also enters the
   walking speeds, so it belongs with the walking model (§6).
 
+## 5h. Walking: behaviour specification (2026-10-10)
+
+The player walks with UE3's standard walking physics and `CalcVelocity`; what is Dishonored's is the top speed and
+acceleration it feeds them, chosen from the gait. This is the behaviour `crates/dis_motion` implements (`controller.rs`,
+`wish` and `calc_velocity`), written as a specification in our own words. Values are read at runtime.
+
+### Data used at runtime
+
+- **Attributes** (Corvo's per difficulty, §6): `m_GroundSpeed` (the pawn's ground speed), `m_GroundSpeedSprint`,
+  `m_GroundSpeedCrouch`, `m_GroundSpeedWalk`, `m_GroundSpeedSlowWalk`, `m_AccelerationRate`,
+  `m_GroundStrafeMultiplierRun/Sprint`, `m_GroundBackwardMultiplierRun/Sprint`, `m_SwordUnsheathedSpeedFactor` and
+  `m_SwordSheathedSpeedFactor`.
+- **Pawn tweak** (Corvo's root over `DisTweaks_Pawn`): `m_fSpeedBlendDownSpeed`, `m_fSneakHeight` (sneaking),
+  `m_fCrouchHeight` (the engine crouch), `m_fMaxWalkableFloorInDegrees` (the walkable floor is its cosine).
+- **Input tweak** (`Twk_Pawn_DefaultPlayer.Twk_Pawn_PlayerInput` over `DisTweaks_PlayerInput`):
+  `m_fSlowWalk_Trigger_Threshold`, `m_fWalk_Trigger_Threshold`, `m_fStopSprint_Threshold`, `m_fStrafeAngle_Forward`,
+  `m_fStrafeAngle_Back`, `m_fBackwardsAngle`.
+- The ground friction is the physics volume's `GroundFriction`.
+
+### The gait
+
+With `m` the movement input's strength (0 to 1) and its direction relative to the view:
+- **Walking**: not sprinting and `m` at most `m_fWalk_Trigger_Threshold`. The walking factor is slow walk speed
+  ÷ ground speed if `m` is at most `m_fSlowWalk_Trigger_Threshold`, else walk speed ÷ ground speed.
+- **Sprinting**: sprint held and `m` above `m_fStopSprint_Threshold`, in any direction. Sprinting ends sneaking.
+- **Strafing** (only when not walking): the angle between the input and the sideways axis is under
+  `m_fStrafeAngle_Forward`, or `m_fStrafeAngle_Back` when the input points backward. **Backing up**: otherwise, pointing
+  backward and within `m_fBackwardsAngle` of straight back.
+
+### The top speed
+
+A factor of the ground speed:
+- sneaking (crouched): crouch speed ÷ ground speed, in every direction;
+- sprinting: sprint speed ÷ ground speed, times the sprint strafe or backward multiplier when strafing or backing up;
+- otherwise: the run strafe or backward multiplier when strafing or backing up, else the walking factor when walking,
+  else 1.
+
+The factor is then multiplied by the sword factor (`m_SwordUnsheathedSpeedFactor` with the sword in hand,
+`m_SwordSheathedSpeedFactor` with empty hands). A higher factor applies at once; a lower one is approached by
+`clamp(Δt · m_fSpeedBlendDownSpeed, 0, 1)` of the difference each frame. The top speed is the ground speed times the
+factor, and the maximum acceleration is `m_AccelerationRate` times the same factor.
+
+### Velocity (UE3)
+
+- **Input held**: the acceleration is the input direction times the maximum acceleration. First the velocity is turned
+  toward the input: `v −= (v − dir·|v|)·Δt·friction`; then `v += acceleration·Δt`.
+- **No input**: braking. In steps of at most 0.03 s the velocity loses `2·friction·step` of itself, and the result is
+  the average velocity over those steps (only while it still points the same way). Reversed, or below 12.7 uu/s, it
+  stops.
+- Either way, the speed is then capped at the top speed.
+
+### Stances
+
+- **Sneaking** (the crouch button) shrinks the collision to `m_fSneakHeight`, keeping the feet. Leaving it restores the
+  standing height if there's room.
+- The engine's own crouch uses `m_fCrouchHeight`. The kit uses it to crawl under gaps too low to sneak through, found
+  `m_fAutoCrouchTestDistance` ahead; how the game decides to crouch that low is not traced yet.
+
+### Still open for walking
+- The game's sneaking strafe and backward multipliers are only reached in a state the kit doesn't have (sneaking without
+  the engine crouch), and the sneak backward one not at all; the kit leaves them out.
+- What sets the walking flag besides a light stick push (a walk key); the kit's walk button walks.
+- Falling still uses the kit's air-control model, not the engine's `PHYS_Falling`.
+
 ## 6. Player motion: where the data lives (2026-10-07)
 
 All of this is read at runtime by `crates/dis_data`. Values are not repeated here.
@@ -699,8 +763,9 @@ carrying-corpse variant). The vertical velocity of the base the player stands on
 | Blink targeting, range, pull-back, ground correction, stepping, end and cooldown, lens parameters | **Follows the game's behaviour** (§5), including moving without collision during travel |
 | Jump velocity | **Follows the game** (attribute `m_JumpZ`) |
 | All speeds, acceleration, air control, gravity, step height, collision sizes, mantle thresholds, slide timing, lean springs, swim | **Game values**, read at runtime |
-| Walking and falling integration | UE3 `CalcVelocity`-style model; Dishonored's own "LocoNew" path not reproduced yet |
-| Strafe and backward multipliers | Applied as a direction ellipse; the game's exact blend is not known |
+| Walking | **Follows the game** (§5h): UE3 walking velocity and braking with Dishonored's gait, top-speed factor, sword factor and blend-down |
+| Falling | The kit's air-control model, not the engine's `PHYS_Falling` |
+| Strafe and backward multipliers | **Follow the game** (§5h): picked by the input's angle |
 | Mantle edge finder, step-up and mantle motion | **Follows the game's behaviour** (§5f): the finder, the step-up and the root-motion climb; the climb's blend-in time is the game's default |
 | Drop assassination: target search, lock-on dive, side, landing place and hold time | **Follows the game's behaviour** (§5b), with tweak values, anchors and timings read at runtime |
 | Sword: swing choice and chaining, reach, target, blade sweep, environment hits, damage | **Follows the game's behaviour** (§5c); with several characters in one sweep the kit takes the first |
@@ -885,7 +950,7 @@ Blink, Agility, the drop and ground assassinations, the sword, tests), `wwise` (
 the game's particle effects, sword fights and drop and ground assassinations on box guards, and `--autopilot` verification routes).
 
 Next:
-1. Dishonored's own walking ("LocoNew") with `m_SwordUnsheathedSpeedFactor`, the lean's collision and forward lean.
+1. The engine's falling physics, the lean's collision and forward lean.
 2. The other passive powers' motion effects, if any are wanted (Vitality, Bloodthirsty and Shadow Kill don't change motion).
 3. Drive camera bob and mantle camera motion from the game's camera animations (the Edge decoder now exists).
 4. SubUV flipbooks and original particle material scrolling/distortion; Blink's screen

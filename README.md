@@ -46,11 +46,11 @@ On Linux the demo runs natively on Wayland with a real pointer lock. Under X11 t
 
 Distances are in metres; the game works in Unreal units, where 1 uu = 1 cm.
 
-- **Walk, run, sprint, sneak**: Corvo runs at 4 m/s, sprints at 6 m/s, sneaks crouched at 2.75 m/s and slow-walks at 2 m/s. These are the `m_GroundSpeed*` attributes from Corvo's release tweak (`Twk_Pawn_Corvo_Release`), per difficulty. Strafing and backing up are slower, with separate multipliers for running, sneaking and sprinting (`m_GroundStrafeMultiplier*`, `m_GroundBackwardMultiplier*`): sprinting sideways is 60% and backwards 55%. Acceleration is 20 m/s² (`m_AccelerationRate`), with UE3's ground friction of 8.
+- **Walk, run, sprint, sneak**: the game's own gait rules (`NOTES.md` §5h). The speeds are the `m_GroundSpeed*` attributes from Corvo's release tweak (`Twk_Pawn_Corvo_Release`), per difficulty: he runs at 4 m/s, sprints at 6 m/s and sneaks at 2.75 m/s, all times 0.9 while his sword is in hand (`m_SwordUnsheathedSpeedFactor`), so 3.6, 5.4 and about 2.5 m/s in practice. A light push on a stick walks, a lighter one slow-walks (`DisTweaks_PlayerInput` thresholds). Pushing within 20° of sideways (50° when moving back) is strafing, and within 40° of straight back is backing up: each has its own factor for running and sprinting (`m_GroundStrafeMultiplier*`, `m_GroundBackwardMultiplier*`), so a forward diagonal runs at full speed. Sprint needs a firm push but works in any direction, and ends sneaking. Acceleration is 20 m/s² (`m_AccelerationRate`), scaled by the same factor, with UE3's ground friction of 8 and its braking. When the top speed drops (letting go of sprint, crouching) it blends down at `m_fSpeedBlendDownSpeed` rather than at once.
 - **Jump**: launches at 8 m/s straight up (`m_JumpZ`, the same attribute the game's `StatePlayerMasterJump` reads) under 15 m/s² of gravity (`DefaultGame.ini`). That's a 2.1 m apex. The vertical speed of whatever you stand on is added, as the game does. Air control is 20% (`m_fAirControl`), and it never pushes you past the speed cap.
 - **Fall**: touching down faster than 22.5 m/s reports fall damage (`m_MaxSpeedBeforeFallingDamage`; there's no health, so the HUD logs it). The landing dip and the camera shake scale with how hard you hit.
-- **Crouch**: the collision shrinks from 1.75 m tall to 58 cm (`DishonoredPawn`'s cylinder and `CrouchHeight`), keeping your feet in place. Standing up only happens if there's room.
-- **Auto-crouch**: walk at a gap only a crouched Corvo fits through and he crouches by himself, then stands once the way ahead is clear (`m_fAutoCrouchTestDistance` 1 m, `m_fAutoCrouchMinCrawlDepth`).
+- **Crouch (sneak)**: the collision shrinks from 1.75 m tall to 1.3 m (`m_fSneakHeight` on Corvo's tweak), keeping your feet in place. Standing up only happens if there's room.
+- **Crawl**: walk at a gap too low to stand or sneak through and Corvo crouches lower by himself, to 66 cm (`m_fCrouchHeight`, the engine's crouch), then gets back up once the way ahead is clear (`m_fAutoCrouchTestDistance` 1 m).
 - **Slide**: crouch while sprinting. Your velocity eases from where you started down to sneak speed over the game's 1.1 s (`m_fSlideTime`), gently at both ends. The first half can't be cancelled (`m_fSlidePercentNotCancelable` 0.5); after that, crouch stands you up, jump jumps out of it and pulling back stops it. Slide into something that turns you more than 25° (`m_fSlideVelocityDeactivateAngle`) and you stop dead with a camera shake.
 - **Mantle**: jump at a ledge, or hold forward or jump while falling past one. The ledge finder is the game's own (`NOTES.md` §5f), with the heights from `m_pMantleTweaks`:
   - it first measures the room above you, then sweeps a box your size forward 50 cm (`m_MantleEdgeSearchDist`) at heights rising 12 cm at a time (`m_LineCheckStepSize`). The first wall it meets must be near-vertical and facing you (within 20° and 45°). From then on the box stays pressed against it and reaches 20 cm in (`m_fMantleForwardMoveAmount`). The first height where that reach is clear is the top of the edge;
@@ -146,7 +146,7 @@ The movement needs only the tuning. Everything else is optional and skipped with
 
 **What's still approximate:**
 
-- **Not yet exact**: walking uses UE3's standard `CalcVelocity` model, not Dishonored's own "LocoNew" walking path, and the lean's wall collision is the kit's own.
+- **Not yet exact**: the lean's wall collision is the kit's own, and falling still uses the kit's model rather than the engine's.
 - **Camera**: the head bob is procedural. The game drives it from a camera animation (`Ply_Nav_LocoCamera_at`), which the Edge decoder can now read but nothing plays yet.
 - **Effects**: SubUV flipbooks and the original materials' scrolling/distortion graphs aren't done. Mesh particles use cooked LOD 0 geometry, UVs, vertex colours and rotation curves. The particle materials, tattoo brightness and Blink lens shader approximate the look; they do not reconstruct the original shaders. The world camera uses HDR bloom.
 - **Smoke**: the hand smoke is simulated relative to the camera, so it doesn't trail behind you as it does in the game.
@@ -164,7 +164,7 @@ A blockout course dressed with the game's textures (`crates/sinhonor_demo/src/le
 2. **Stairs** on the right, 20 cm risers up to a 3 m balcony.
 3. **Gravel patch** on the left and a **puddle** on the right, for footsteps and their dust and splashes.
 4. **Pool** behind you to the left: 4 m deep, for swimming and climbing out.
-5. **Slide lane**: a crawl beam 1 m off the ground that only fits you crouched or sliding.
+5. **Slide lane**: a crawl beam 1 m off the ground that only fits you crawling.
 6. **Lean pillars** to peek round.
 7. **Ladder tower**, 6 m up, then **rooftops** with gaps of 8 m, 10 m and 14 m. Tier I clears the first, and the last needs tier II.
 8. **The perch**: an 11 m pillar you can only reach by blinking upward from the rooftops.
@@ -207,12 +207,14 @@ cargo test --workspace
 `crates/dis_motion/tests/motion.rs` drives the controller with scripted input. It checks:
 
 - settling on the floor and running at run speed;
+- the gait: full speed straight ahead and on the forward diagonal, the strafe factor sideways and on the back diagonal, the backward factor straight back, walking and slow walking on a light push, the sprint's backward factor, and the sword's slowdown;
+- the top speed blending down after a sprint, and braking to a dead stop;
 - the jump apex against ballistics;
 - Agility's power jump: only when jump is held to the top, once, and not without the power; and the other two jump styles;
 - stepping up small ledges and mantling tall ones; the edge finder's step-up for low edges and animation-driven climb (facing the edge) for high ones, refusing walls at a glancing angle, crouching under a low roof, and catching edges only well past them when falling fast;
 - the slide easing to crouch speed, cancelling only after its first part, and stopping dead when a wall turns it;
 - the lean swinging the head out on its lever to the angle limit, holding the view, and springing back;
-- auto-crouching under a low gap;
+- auto-crouching under a low gap, and crawling under one too low to sneak under;
 - Blink reaching a wall and keeping momentum, staying on the floor when cast crouched, and its squashed-sphere range;
 - swimming at the surface and climbing a ladder;
 - the sword: forehand and backhand chaining, hitting a guard in reach and finishing it with a killing blow, recoiling off a wall, missing out of reach, the reach growing with forward speed, and the sneak attack when crouched;
@@ -229,7 +231,7 @@ All the tuning is read at runtime by `crates/dis_data`, and `cargo run --release
 - **Pawn defaults** (`DishonoredGame.upk`, `Engine.upk`): collision size, crouch size, step height, eye height, ladder speed, walkable floor angle and friction, from the class default objects.
 - **INI files**: gravity, lean springs, swim strokes, FOV, bob and roll, the jump style, and the powers' upgrade levels with their attribute modifiers.
 - **Animations** (`Startup.upk`): slides and landings last as long as the animations that play them, and mantles follow their animation's root motion until its exit notify.
-- **Behaviour**: Blink's targeting, travel, end and screen effect, and the jump, follow the behaviour specified in `NOTES.md` §5; the drop assassination follows §5b, the sword §5c, the ground assassination §5d, Agility §5e, the mantle §5f and the slide and lean §5g. No game code, decompiled or otherwise, is in this repository.
+- **Behaviour**: Blink's targeting, travel, end and screen effect, and the jump, follow the behaviour specified in `NOTES.md` §5; the drop assassination follows §5b, the sword §5c, the ground assassination §5d, Agility §5e, the mantle §5f, the slide and lean §5g and walking §5h. No game code, decompiled or otherwise, is in this repository.
 
 ## Layout
 
