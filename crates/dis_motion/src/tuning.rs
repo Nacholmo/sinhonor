@@ -20,6 +20,8 @@ pub struct MotionTuning {
     /// The fastest the player moves while falling (a total speed).
     pub terminal_velocity: f32,
     pub ladder_speed: f32,
+    /// Jumping off a ladder leaps this fast along the view, twice as fast under a low ceiling.
+    pub ladder_jump_speed: f32,
 
     pub run_speed: f32,
     pub sprint_speed: f32,
@@ -262,6 +264,7 @@ impl MotionTuning {
             walkable_floor_z: p.walkable_floor_z,
             terminal_velocity: p.terminal_velocity,
             ladder_speed: p.ladder_speed,
+            ladder_jump_speed: p.jump_impulse,
             run_speed: p.ground_speed,
             sprint_speed: p.ground_speed_sprint,
             crouch_speed: p.ground_speed_crouch,

@@ -15,6 +15,8 @@ const MAX_SUBSTEP: f32 = 1.0 / 90.0;
 const FLOOR_SNAP: f32 = 4.0;
 /// How long jump must have been held, at the top of a jump, for the fixed power jump (game constant).
 pub const POWER_JUMP_MIN_HOLD: f32 = 0.05;
+/// How far above a climber the ladder leap looks for a ceiling (game constant).
+const LADDER_CEILING_CHECK: f32 = 200.0;
 /// Stiffness of the kit's spring holding a swimmer's eyes at the surface (per second squared).
 const SURFACE_SPRING: f32 = 6.0;
 /// Air control at or below this counts as none (engine constant).
@@ -1311,7 +1313,11 @@ impl Motion {
             return;
         };
         if Self::pressed(input.jump, prev.jump) {
-            self.vel = l.normal * 250.0 + Vec3::Z * 200.0;
+            // The game's leap off a ladder: along the view's heading, twice as fast with a ceiling
+            // close overhead.
+            let low_ceiling = world.sweep(self.pos, self.pos + Vec3::Z * LADDER_CEILING_CHECK, Vec3::ZERO).is_some();
+            let (fwd, _) = yaw_axes(self.yaw);
+            self.vel = fwd * t.ladder_jump_speed * if low_ceiling { 2.0 } else { 1.0 };
             self.state = MotionState::Falling;
             ev.jumped = true;
             return;

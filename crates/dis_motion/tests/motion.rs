@@ -39,6 +39,7 @@ fn tuning() -> MotionTuning {
         walkable_floor_z: 0.7,
         terminal_velocity: 2500.0,
         ladder_speed: 200.0,
+        ladder_jump_speed: 450.0,
         run_speed: 400.0,
         sprint_speed: 600.0,
         crouch_speed: 200.0,
@@ -986,4 +987,21 @@ fn swims_at_water_speed_with_the_sword_put_away() {
     let before = m.speed_2d();
     run(&mut m, &w, Input::default(), 0.1);
     assert!(m.speed_2d() < before && m.speed_2d() > before * 0.5, "glides: {}", m.speed_2d());
+}
+
+#[test]
+fn leaps_off_a_ladder_along_the_view() {
+    let mut w = floor_world();
+    w.add_box(Vec3::new(300.0, -200.0, 0.0), Vec3::new(400.0, 200.0, 600.0));
+    w.add_ladder(Vec3::new(280.0, -50.0, 0.0), Vec3::new(300.0, 50.0, 600.0), Vec3::new(-1.0, 0.0, 0.0));
+    let mut m = Motion::new(tuning(), Vec3::ZERO, 0.0);
+    for _ in 0..90 {
+        m.update(&w, &fwd(), 1.0 / 60.0);
+    }
+    assert_eq!(m.state, MotionState::Ladder);
+    // Turn round (look back along -X) and jump: a leap away at the ladder-jump speed.
+    m.yaw = std::f32::consts::PI;
+    m.update(&w, &Input { jump: true, ..Default::default() }, 1.0 / 60.0);
+    assert_eq!(m.state, MotionState::Falling);
+    assert!((m.vel.x + tuning().ladder_jump_speed).abs() < 15.0 && m.vel.y.abs() < 1.0, "leap {:?}", m.vel);
 }

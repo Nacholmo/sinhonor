@@ -90,6 +90,7 @@ pub struct PlayerTuning {
     pub full_stop_extra_stop_vel: f32,
     pub held_power_jump_button_time: f32,
     pub held_power_jump_accel: f32,
+    /// The leap off a ladder (`m_fJumpImpulse`, not the normal jump).
     pub jump_impulse: f32,
     pub air_control: f32,
     pub max_speed_before_fall_damage: f32,

@@ -734,6 +734,12 @@ itself, and there is no braking. The pawn's `Buoyancy` is 1 (`DefaultPawn.ini`),
 swim state's stroke settings (`m_fStrokeTime`, `m_fMinSwimAccel`, `m_fMaxSwimAccel`, `m_fMaxSpeedNoStroke`, the stroke
 time extension attribute and the surface stroke delay) pace the strokes; no movement code reads the accelerations.
 
+### Ladder
+
+Climbing switches the player to the engine's ladder physics and puts the sword away. Jumping off sets the velocity along
+the view's heading at `m_fJumpImpulse` on Corvo's tweak (525), twice that if a line straight up from the player hits a
+ceiling within 2 m. The kit keeps its own climbing model at the pawn's `LadderSpeed`.
+
 ### Still open for walking
 - The game's sneaking strafe and backward multipliers are only reached in a state the kit doesn't have (sneaking without
   the engine crouch), and the sneak backward one not at all; the kit leaves them out.
@@ -780,7 +786,7 @@ and the lean spring constants, angles, tilt and height ratio.
 
 **Jump (`StatePlayerMasterJump`).** Z velocity is set from the `m_JumpZ` attribute (or the
 carrying-corpse variant). The vertical velocity of the base the player stands on is added, then physics switches to Falling.
-`m_JumpStyle` selects how the jump button lifts a jump further (Agility's power jump, §5e). `m_fJumpImpulse` is not the normal jump.
+`m_JumpStyle` selects how the jump button lifts a jump further (Agility's power jump, §5e). `m_fJumpImpulse` is not the normal jump: it is the leap off a ladder (§5h).
 
 ### Fidelity of the current motion core
 
@@ -800,7 +806,7 @@ carrying-corpse variant). The vertical velocity of the base the player stands on
 | Lean | **Follows the game's lean camera** (§5g): head point on a lever, spring, angle limit with softening, tilt, view limits; collision is the kit's own |
 | Bob, landing dip | Procedural approximations; the game drives bob from `Ply_Nav_LocoCamera_at` |
 | Swim | **Follows the engine** (§5h): fluid velocity with the water's friction and the gait factors; the surface hold is the kit's |
-| Ladder | A simple model using the game's ladder speed |
+| Ladder | The kit's climbing model at the game's ladder speed; the leap off **follows the game** (§5h) |
 | Agility: levels, modifiers, power jump (all three jump styles), fall limits, level II speeds | **Follows the game's behaviour** (§5e), with the power list and attributes read at runtime |
 
 ## 6b. Sound (Wwise), read at runtime (2026-10-07)
