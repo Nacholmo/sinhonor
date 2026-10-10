@@ -15,6 +15,8 @@ const MAX_SUBSTEP: f32 = 1.0 / 90.0;
 const FLOOR_SNAP: f32 = 4.0;
 /// How long jump must have been held, at the top of a jump, for the fixed power jump (game constant).
 pub const POWER_JUMP_MIN_HOLD: f32 = 0.05;
+/// Stiffness of the kit's spring holding a swimmer's eyes at the surface (per second squared).
+const SURFACE_SPRING: f32 = 6.0;
 /// Air control at or below this counts as none (engine constant).
 const AIR_CONTROL_MIN: f32 = 0.05;
 /// Below this horizontal speed, air control gets a boost to reach it (engine constant).
@@ -190,7 +192,6 @@ pub struct Motion {
     prev: Input,
     mantle: MantleRun,
     slide: SlideRun,
-    swim_stroke: f32,
     fall_peak_speed: f32,
 }
 
@@ -223,7 +224,6 @@ impl Motion {
             prev: Input::default(),
             mantle: MantleRun::default(),
             slide: SlideRun::default(),
-            swim_stroke: 0.0,
             fall_peak_speed: 0.0,
             tuning,
         }
@@ -481,26 +481,33 @@ impl Motion {
     /// backward factors when the input points within their angles. The sword in hand slows it all.
     fn wish(&self, input: &Input) -> (Vec3, f32) {
         let t = &self.tuning;
+        let (fwd, right) = yaw_axes(self.yaw);
+        let dir = (fwd * input.move_axis.y + right * input.move_axis.x).normalize_or_zero();
+        let hands = if self.sword_out { t.sword_speed_factor } else { t.empty_hand_speed_factor };
+        (dir, self.gait_factor(input, self.crouched, self.sprinting) * hands)
+    }
+
+    /// The gait's top-speed factor, before the hands.
+    fn gait_factor(&self, input: &Input, crouched: bool, sprinting: bool) -> f32 {
+        let t = &self.tuning;
         let g = &t.gait;
         let axis = input.move_axis;
         let mag = axis.length().min(1.0);
-        let (fwd, right) = yaw_axes(self.yaw);
-        let dir = (fwd * axis.y + right * axis.x).normalize_or_zero();
-        if mag <= 1e-4 {
-            return (Vec3::ZERO, 0.0);
-        }
         let run = t.run_speed.max(1.0);
-        let walking = !self.sprinting && (input.walk || mag <= g.walk_threshold);
+        // No input is not walking: the top speed stays the gait's, and braking does the stopping.
+        let pushed = mag > 1e-4;
+        let walking = pushed && !sprinting && (input.walk || mag <= g.walk_threshold);
         let walk_factor = if !input.walk && mag <= g.slow_walk_threshold { t.slow_walk_speed } else { t.walk_speed } / run;
         // The input's angle: within the strafe angle of sideways, or the backwards angle of back.
-        let (side, ahead) = (axis.x.abs() / axis.length(), axis.y / axis.length());
+        let len = axis.length().max(1e-6);
+        let (side, ahead) = (axis.x.abs() / len, axis.y / len);
         let backing = ahead < 0.0;
         let strafe_limit = if backing { g.strafe_angle_back_deg } else { g.strafe_angle_forward_deg };
-        let strafing = !walking && side.clamp(-1.0, 1.0).acos().to_degrees() < strafe_limit;
-        let backward = !walking && !strafing && backing && ahead.abs().clamp(-1.0, 1.0).acos().to_degrees() < g.backwards_angle_deg;
-        let factor = if self.crouched {
+        let strafing = pushed && !walking && side.clamp(-1.0, 1.0).acos().to_degrees() < strafe_limit;
+        let backward = pushed && !walking && !strafing && backing && ahead.abs().clamp(-1.0, 1.0).acos().to_degrees() < g.backwards_angle_deg;
+        if crouched {
             t.crouch_speed / run
-        } else if self.sprinting {
+        } else if sprinting {
             t.sprint_speed / run
                 * if strafing {
                     t.strafe_mult_sprint
@@ -517,9 +524,7 @@ impl Motion {
             walk_factor
         } else {
             1.0
-        };
-        let hands = if self.sword_out { t.sword_speed_factor } else { t.empty_hand_speed_factor };
-        (dir, factor * hands)
+        }
     }
 
     /// Moves the top-speed factor toward `target`: down smoothly, up at once.
@@ -584,7 +589,7 @@ impl Motion {
         }
         self.sprinting = input.sprint && firm && !self.crouched;
         let leaning = input.lean != 0.0 && self.speed_2d() < 50.0;
-        let (dir, target) = if leaning { (Vec3::ZERO, 0.0) } else { self.wish(input) };
+        let (dir, target) = if leaning { (Vec3::ZERO, self.wish(&Input::default()).1) } else { self.wish(input) };
         let factor = self.blend_speed_factor(target, dt);
 
         // Ladder: walking into one starts climbing.
@@ -1261,22 +1266,24 @@ impl Motion {
             wish.z += 1.0;
         }
         let wish = wish.normalize_or_zero();
-        // Strokes: strong acceleration for a stroke, then the weaker glide acceleration.
-        if wish != Vec3::ZERO && self.swim_stroke <= 0.0 {
-            self.swim_stroke = t.swim.stroke_time;
+        // UE3 swimming: `CalcVelocity` in fluid, with half the water's fluid friction and no braking.
+        // Swimming puts the sword away, and the gait's strafe and backward factors still apply.
+        self.sprinting = false;
+        let factor = self.gait_factor(input, false, false) * t.empty_hand_speed_factor;
+        let (max_speed, max_accel, friction) = (t.water_speed * factor, t.accel_rate * factor, t.fluid_friction * 0.5);
+        if wish != Vec3::ZERO {
+            let speed = self.vel.length();
+            self.vel -= (self.vel - wish * speed) * dt * friction;
         }
-        let accel = if self.swim_stroke > 0.0 { t.swim.max_accel } else { t.swim.min_accel };
-        self.swim_stroke -= dt;
-        self.vel += wish * accel * dt;
-        self.vel *= (1.0 - t.ground_friction * 0.3 * dt).max(0.0);
-        let cap = if wish == Vec3::ZERO { t.swim.max_speed_no_stroke } else { t.water_speed };
-        if self.vel.length() > cap {
-            self.vel = self.vel.normalize() * cap;
+        self.vel = self.vel * (1.0 - friction * dt) + wish * max_accel * dt;
+        if self.vel.length() > max_speed {
+            self.vel = self.vel.normalize_or_zero() * max_speed;
         }
-        // Buoyancy holds the eyes at the surface when not diving.
+        // The kit holds the eyes at the surface when not diving (a critically damped spring).
         if axis == Vec2::ZERO || at_surface {
             let target = water.surface_z - self.eye_height_for(false) + 4.0;
-            self.vel.z += (target - self.pos.z) * 6.0 * dt;
+            let (k, c) = (SURFACE_SPRING, 2.0 * SURFACE_SPRING.sqrt());
+            self.vel.z += ((target - self.pos.z) * k - self.vel.z * c) * dt;
         }
         // Climb out onto a ledge.
         if at_surface && (Self::pressed(input.jump, prev.jump) || axis.y > 0.1) {

@@ -59,6 +59,7 @@ fn tuning() -> MotionTuning {
         accel_rate: 2000.0,
         ground_friction: 8.0,
         braking: 8.0,
+        fluid_friction: 2.0,
         strafe_mult_run: 0.8,
         strafe_mult_sneak: 0.8,
         strafe_mult_sprint: 0.5,
@@ -918,7 +919,9 @@ fn top_speed_falls_smoothly_and_braking_stops_dead() {
     assert!(m.speed_2d() > t.run_speed + 100.0, "still fast: {}", m.speed_2d());
     run(&mut m, &w, fwd(), 1.0);
     assert!((m.speed_2d() - t.run_speed).abs() < 2.0);
-    // No input: braking brings it to a dead stop.
+    // No input: braking slows it over a few frames, then stops it dead.
+    run(&mut m, &w, Input::default(), 1.0 / 60.0);
+    assert!(m.speed_2d() > t.run_speed * 0.5 && m.speed_2d() < t.run_speed, "braking: {}", m.speed_2d());
     run(&mut m, &w, Input::default(), 0.5);
     assert_eq!(m.speed_2d(), 0.0);
 }
@@ -965,4 +968,22 @@ fn falls_no_faster_than_terminal_velocity() {
     run(&mut m, &w, Input::default(), 4.0);
     assert_eq!(m.state, MotionState::Falling);
     assert!((m.vel.length() - tuning().terminal_velocity).abs() < 1.0, "falling at {}", m.vel.length());
+}
+
+#[test]
+fn swims_at_water_speed_with_the_sword_put_away() {
+    let mut w = floor_world();
+    w.add_water(Vec3::new(-5000.0, -5000.0, -100.0), Vec3::new(5000.0, 5000.0, 400.0));
+    let mut t = tuning();
+    t.sword_speed_factor = 0.5;
+    let water_speed = t.water_speed;
+    let mut m = Motion::new(t, Vec3::new(0.0, 0.0, 500.0), 0.0);
+    run(&mut m, &w, Input::default(), 2.0);
+    assert_eq!(m.state, MotionState::Swimming);
+    run(&mut m, &w, fwd(), 3.0);
+    assert!((m.speed_2d() - water_speed).abs() < 2.0, "swimming at {}", m.speed_2d());
+    // Letting go: the water slows the swimmer gradually (no braking).
+    let before = m.speed_2d();
+    run(&mut m, &w, Input::default(), 0.1);
+    assert!(m.speed_2d() < before && m.speed_2d() > before * 0.5, "glides: {}", m.speed_2d());
 }

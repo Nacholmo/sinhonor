@@ -35,6 +35,8 @@ pub struct MotionTuning {
     pub water_speed: f32,
     pub accel_rate: f32,
     pub ground_friction: f32,
+    /// The water volume's fluid friction (half of it applies to swimming).
+    pub fluid_friction: f32,
     pub braking: f32,
     pub strafe_mult_run: f32,
     pub strafe_mult_sneak: f32,
@@ -144,6 +146,8 @@ pub struct LeanTuning {
     pub fixed_time_step: f32,
 }
 
+/// The game's swim-stroke pacing (`StatePlayerMasterSwim`). Strokes pace the swimming animation and
+/// sounds; the movement itself is the engine's (`NOTES.md` §5h).
 #[derive(Clone, Debug)]
 pub struct SwimTuning {
     pub min_accel: f32,
@@ -277,6 +281,7 @@ impl MotionTuning {
             water_speed: p.water_speed,
             accel_rate: p.accel_rate,
             ground_friction: p.ground_friction,
+            fluid_friction: p.water_friction,
             braking: p.ground_friction,
             strafe_mult_run: p.strafe_mult_run,
             strafe_mult_sneak: p.strafe_mult_sneak,

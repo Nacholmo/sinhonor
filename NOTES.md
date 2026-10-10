@@ -686,7 +686,7 @@ A factor of the ground speed:
 - sneaking (crouched): crouch speed ÷ ground speed, in every direction;
 - sprinting: sprint speed ÷ ground speed, times the sprint strafe or backward multiplier when strafing or backing up;
 - otherwise: the run strafe or backward multiplier when strafing or backing up, else the walking factor when walking,
-  else 1.
+  else 1. No input counts as none of these, so letting go keeps the gait's top speed and braking does the stopping.
 
 The factor is then multiplied by the sword factor (`m_SwordUnsheathedSpeedFactor` with the sword in hand,
 `m_SwordSheathedSpeedFactor` with empty hands). A higher factor applies at once; a lower one is approached by
@@ -724,11 +724,22 @@ The engine's falling physics, with Corvo's `m_fAirControl` and the attributes ab
 - **The cap** is the physics volume's `TerminalVelocity`, on the total speed. (The pawn's `MaxFallSpeed` is not a cap;
   the game uses it to end a slide that falls faster.)
 
+### Swimming (UE3)
+
+The engine's swimming physics: `CalcVelocity` in fluid. The top speed is `m_WaterSpeed` times the gait factor above
+(the strafe and backward factors apply), the maximum acceleration `m_AccelerationRate` times the same factor, and the
+friction half the water volume's `FluidFriction`. Swimming puts the sword away (the empty-hands factor applies). With
+input, friction turns the velocity toward it while it accelerates; every step the velocity also loses `friction·Δt` of
+itself, and there is no braking. The pawn's `Buoyancy` is 1 (`DefaultPawn.ini`), so gravity cancels out in water. The
+swim state's stroke settings (`m_fStrokeTime`, `m_fMinSwimAccel`, `m_fMaxSwimAccel`, `m_fMaxSpeedNoStroke`, the stroke
+time extension attribute and the surface stroke delay) pace the strokes; no movement code reads the accelerations.
+
 ### Still open for walking
 - The game's sneaking strafe and backward multipliers are only reached in a state the kit doesn't have (sneaking without
   the engine crouch), and the sneak backward one not at all; the kit leaves them out.
 - What sets the walking flag besides a light stick push (a walk key); the kit's walk button walks.
-- Velocity inside water volumes (their fluid friction) and the water-entry fall fixes.
+- How the game keeps a swimmer at the surface: the engine damps upward speed by how submerged the pawn is; the kit holds
+  the eyes at the surface with a damped spring instead. The water-entry fall fixes are not in.
 
 ## 6. Player motion: where the data lives (2026-10-07)
 
@@ -788,7 +799,8 @@ carrying-corpse variant). The vertical velocity of the base the player stands on
 | Slide | **Follows the game's behaviour** (§5g): eased velocity, impact stop, cancels; without the slide damage |
 | Lean | **Follows the game's lean camera** (§5g): head point on a lever, spring, angle limit with softening, tilt, view limits; collision is the kit's own |
 | Bob, landing dip | Procedural approximations; the game drives bob from `Ply_Nav_LocoCamera_at` |
-| Ladder, swim | Simple models using the game's speeds and accelerations |
+| Swim | **Follows the engine** (§5h): fluid velocity with the water's friction and the gait factors; the surface hold is the kit's |
+| Ladder | A simple model using the game's ladder speed |
 | Agility: levels, modifiers, power jump (all three jump styles), fall limits, level II speeds | **Follows the game's behaviour** (§5e), with the power list and attributes read at runtime |
 
 ## 6b. Sound (Wwise), read at runtime (2026-10-07)
@@ -965,7 +977,7 @@ Blink, Agility, the drop and ground assassinations, the sword, tests), `wwise` (
 the game's particle effects, sword fights and drop and ground assassinations on box guards, and `--autopilot` verification routes).
 
 Next:
-1. The lean's collision and forward lean, and swimming.
+1. The lean's collision and forward lean, the ladder, and how a swimmer stays at the surface.
 2. The other passive powers' motion effects, if any are wanted (Vitality, Bloodthirsty and Shadow Kill don't change motion).
 3. Drive camera bob and mantle camera motion from the game's camera animations (the Edge decoder now exists).
 4. SubUV flipbooks and original particle material scrolling/distortion; Blink's screen

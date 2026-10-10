@@ -58,7 +58,7 @@ Distances are in metres; the game works in Unreal units, where 1 uu = 1 cm.
   - under 44 cm you just step up (`MaxStepHeight`). Low edges, 55 cm–1.2 m, are a step-up mantle: three quick moves (to the wall, up, 20 cm on) with the view catching up over 0.2 s (`m_fLowMantleStepUpBlendTime`). Medium (1.2–1.7 m) and high (1.7–2.3 m) ones turn you to face the edge and climb along the animation's own root motion, its rise stretched to the edge's height, until the animation's exit (`Empty_MantleMedium`, `…High`, or the crouched ones). Over 2.3 m is too high, so Blink up;
   - falling faster than 10 m/s you can only catch edges at least 1.55 m above your feet (`m_fFallSpeedForLedgeGrab`, `m_fLedgeGrabMantleMinEdgeHeight`), and past 20 m/s none (`m_fMaxFallSpeedForMantle`). After a blink, the Blink finder (`m_pMantleBlinkTweaks`) has no minimum height.
 - **Lean**: Q and E lean, standing still. As in the game (`NOTES.md` §5g), your head is a point on a lever around a pivot two body heights below it (`m_fLeanHeightPct`): the lean pushes it out at 10 m/s (`m_fLeanSpeed`), it swings out and drops a little until the lever is 15° over (`m_fMaxLeanAngle`, giving up to 5° more if you keep pushing), and a spring (springiness 80, damping 12) brings it back. The camera tilts by half the angle, the view can turn only 60° and pitch 35° from where the lean started, and the head never goes through a wall.
-- **Swim**: walk into deep water and you swim at up to 6 m/s (`m_WaterSpeed`). Like the game, you move in strokes: strong acceleration for 0.3 s, then a weaker glide (`DefaultPlayerState.ini`'s swim block). Buoyancy holds your eyes at the surface. Swim at a ledge and jump to climb out.
+- **Swim**: walk into deep water and you swim at up to 6 m/s (`m_WaterSpeed`), toward where you look, with the sword put away. It's the engine's swimming: acceleration and steering as on the ground, but the water's friction (half of `FluidFriction`) slows you continuously instead of braking. The kit holds your eyes at the surface. Swim at a ledge and jump to climb out.
 - **Ladder**: walk into one to grab on. You climb at 2.54 m/s (`LadderSpeed`) toward where you look, and step off onto the landing at the top.
 - **Camera**: head bob and roll scale with speed (the bob and roll amounts from `DefaultCamera.ini`), landings dip the view on a spring, and the FOV is the game's 75°.
 
@@ -146,7 +146,7 @@ The movement needs only the tuning. Everything else is optional and skipped with
 
 **What's still approximate:**
 
-- **Not yet exact**: the lean's wall collision is the kit's own, and swimming is a simple model.
+- **Not yet exact**: the lean's wall collision and the swimmer's surface hold are the kit's own, and the ladder is a simple model.
 - **Camera**: the head bob is procedural. The game drives it from a camera animation (`Ply_Nav_LocoCamera_at`), which the Edge decoder can now read but nothing plays yet.
 - **Effects**: SubUV flipbooks and the original materials' scrolling/distortion graphs aren't done. Mesh particles use cooked LOD 0 geometry, UVs, vertex colours and rotation curves. The particle materials, tattoo brightness and Blink lens shader approximate the look; they do not reconstruct the original shaders. The world camera uses HDR bloom.
 - **Smoke**: the hand smoke is simulated relative to the camera, so it doesn't trail behind you as it does in the game.
@@ -217,7 +217,7 @@ cargo test --workspace
 - the lean swinging the head out on its lever to the angle limit, holding the view, and springing back;
 - auto-crouching under a low gap, and crawling under one too low to sneak under;
 - Blink reaching a wall and keeping momentum, staying on the floor when cast crouched, and its squashed-sphere range;
-- swimming at the surface and climbing a ladder;
+- swimming at the surface, at water speed with the sword put away and gliding when you let go, and climbing a ladder;
 - the sword: forehand and backhand chaining, hitting a guard in reach and finishing it with a killing blow, recoiling off a wall, missing out of reach, the reach growing with forward speed, and the sneak attack when crouched;
 - the ground assassination: killing an unaware guard from behind with the victim placed in front, refusing guards in combat or running, slow then fast kills, and the plain kill when the world is in the way;
 - the drop assassination: a kill in reach, the lock-on dive from higher up, the side chosen from the target's facing, the landing place, sweeping Corvo's box, and no target when something is in the way, when rising or on the ground.

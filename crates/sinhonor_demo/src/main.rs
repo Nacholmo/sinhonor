@@ -207,7 +207,7 @@ fn autopilot_fx_script() -> Vec<Step> {
         step("walk into puddle", 0.9, fwd),
         Step { shot: true, ..step("puddle steps", 0.25, fwd) },
         Step { teleport: Some([-2000.0, -1250.0, 0.0]), view: Some((-FRAC_PI_2, -0.5)), ..step("to pool edge", 0.5, idle) },
-        step("walk off into the pool", 0.45, fwd),
+        step("walk off into the pool", 0.6, fwd),
         Step { shot: true, ..step("splash", 0.35, idle) },
         step("settle", 1.5, idle),
         Step { view: Some((-FRAC_PI_2, -0.3)), shot: true, ..step("swimming", 1.2, fwd) },
