@@ -15,6 +15,10 @@ const MAX_SUBSTEP: f32 = 1.0 / 90.0;
 const FLOOR_SNAP: f32 = 4.0;
 /// How long jump must have been held, at the top of a jump, for the fixed power jump (game constant).
 pub const POWER_JUMP_MIN_HOLD: f32 = 0.05;
+/// Air control at or below this counts as none (engine constant).
+const AIR_CONTROL_MIN: f32 = 0.05;
+/// Below this horizontal speed, air control gets a boost to reach it (engine constant).
+const AIR_CONTROL_MIN_SPEED: f32 = 10.0;
 /// Braking is applied in steps of at most this long (engine constant).
 const BRAKE_STEP: f32 = 0.03;
 /// Braking below this speed stops dead (engine constant).
@@ -744,20 +748,37 @@ impl Motion {
     fn fall(&mut self, world: &dyn World, input: &Input, dt: f32, ev: &mut StepEvents) {
         self.jump_tick(input, dt, ev);
         let t = self.tuning.clone();
-        let (dir, factor) = self.wish(input);
-        let max_speed = t.run_speed * factor;
-        // Air control: a fraction of ground acceleration, never adding speed past the cap.
-        let before = self.speed_2d();
-        if dir != Vec3::ZERO {
-            let mut v = self.vel.truncate() + dir.truncate() * t.accel_rate * t.air_control * dt;
-            let cap = before.max(max_speed);
-            if v.length() > cap {
-                v = v.normalize() * cap;
+        let (dir, _) = self.wish(input);
+        // Air control (UE3 falling, `NOTES.md` §5h): the input pushes at most the air-control share
+        // of the acceleration, none if that push runs into something, and from ground speed up it
+        // can steer but not add speed.
+        let mut air = t.air_control;
+        if air > AIR_CONTROL_MIN && dir != Vec3::ZERO {
+            let test = (self.vel.with_z(0.0) + dir * t.accel_rate * air) * dt;
+            if world.sweep(self.pos, self.pos + test.with_z(0.0), self.half()).is_some() {
+                air = 0.0;
             }
-            self.vel.x = v.x;
-            self.vel.y = v.y;
         }
-        self.vel.z = (self.vel.z + t.gravity_z * dt).max(-t.max_fall_speed);
+        let speed_2d = self.speed_2d();
+        let mut max_accel = t.accel_rate * air;
+        let mut limit_2d = None;
+        if speed_2d < AIR_CONTROL_MIN_SPEED && air > 0.0 {
+            max_accel += (AIR_CONTROL_MIN_SPEED - speed_2d) / dt.max(1e-4);
+        } else if speed_2d >= t.run_speed {
+            if air <= AIR_CONTROL_MIN {
+                max_accel = 1.0;
+            } else {
+                limit_2d = Some(speed_2d);
+            }
+        }
+        self.vel += dir * t.accel_rate.min(max_accel) * dt + Vec3::Z * t.gravity_z * dt;
+        if let Some(l) = limit_2d.filter(|l| self.speed_2d() > *l) {
+            let v = self.vel.truncate().normalize_or_zero() * l;
+            self.vel = Vec3::new(v.x, v.y, self.vel.z);
+        }
+        if self.vel.length() > t.terminal_velocity {
+            self.vel = self.vel.normalize_or_zero() * t.terminal_velocity;
+        }
         self.fall_peak_speed = self.fall_peak_speed.max(-self.vel.z);
 
         // Ledge catch: pressing toward a ledge (or holding jump) while airborne.

@@ -37,7 +37,7 @@ fn tuning() -> MotionTuning {
         max_step_height: 30.0,
         base_eye_height: 70.0,
         walkable_floor_z: 0.7,
-        max_fall_speed: 2000.0,
+        terminal_velocity: 2500.0,
         ladder_speed: 200.0,
         run_speed: 400.0,
         sprint_speed: 600.0,
@@ -792,7 +792,7 @@ fn falling_fast_catches_edges_only_once_well_past_them() {
     // feet when it was caught, and whether it was a hard catch.
     let fall = |speed: f32| {
         let w = wall_world(400.0);
-        let mut m = Motion::new(tuning(), Vec3::new(69.0, 0.0, 420.0), 0.0);
+        let mut m = Motion::new(tuning(), Vec3::new(69.0, 0.0, 380.0), 0.0);
         m.vel = Vec3::new(0.0, 0.0, -speed);
         for _ in 0..60 {
             let e = m.update(&w, &fwd(), 1.0 / 60.0);
@@ -935,4 +935,34 @@ fn crawls_under_gaps_too_low_to_sneak_through() {
     assert!(m.pos.x > 230.0, "made it under, x {}", m.pos.x);
     run(&mut m, &w, fwd(), 2.0);
     assert!(!m.crouched && !m.crawling, "up again past it, x {}", m.pos.x);
+}
+
+#[test]
+fn air_control_steers_but_never_adds_speed_past_ground_speed() {
+    let w = floor_world();
+    let t = tuning();
+    // A standing jump, pushing forward: the push is the air-control share of the acceleration.
+    let mut m = Motion::new(tuning(), Vec3::ZERO, 0.0);
+    run(&mut m, &w, Input::default(), 0.3);
+    run(&mut m, &w, Input { jump: true, ..Default::default() }, 1.0 / 60.0);
+    run(&mut m, &w, fwd(), 0.3);
+    let expected = t.accel_rate * t.air_control * 0.3;
+    assert!(m.state == MotionState::Falling && (m.speed_2d() - expected).abs() < 25.0, "air push {} vs {expected}", m.speed_2d());
+    // A sprinting jump (faster than ground speed): pushing on can steer, but not speed up.
+    let mut m = Motion::new(tuning(), Vec3::ZERO, 0.0);
+    run(&mut m, &w, Input { sprint: true, ..fwd() }, 1.0);
+    let launch = m.speed_2d();
+    run(&mut m, &w, Input { jump: true, sprint: true, ..fwd() }, 1.0 / 60.0);
+    run(&mut m, &w, Input { sprint: true, ..fwd() }, 0.3);
+    assert!(m.speed_2d() <= launch + 0.5, "{} after launching at {launch}", m.speed_2d());
+}
+
+#[test]
+fn falls_no_faster_than_terminal_velocity() {
+    let mut w = BoxWorld::default();
+    w.add_box(Vec3::new(-500.0, -500.0, -20000.0), Vec3::new(500.0, 500.0, -19900.0));
+    let mut m = Motion::new(tuning(), Vec3::ZERO, 0.0);
+    run(&mut m, &w, Input::default(), 4.0);
+    assert_eq!(m.state, MotionState::Falling);
+    assert!((m.vel.length() - tuning().terminal_velocity).abs() < 1.0, "falling at {}", m.vel.length());
 }

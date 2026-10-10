@@ -334,7 +334,9 @@ fn autopilot_script() -> Vec<Step> {
         Step { shot: true, ..step("after blink", 0.1, idle) },
         step("walk to ladder + climb", 4.2, fwd),
         Step { shot: true, ..step("on tower roof", 0.6, idle) },
-        step("walk to roof edge", 0.5, fwd),
+        // From a set spot, so the rooftop blink doesn't depend on how the climb went.
+        Step { teleport: Some([2700.0, 0.0, 600.0]), view: Some((0.0, 0.0)), ..step("to roof edge", 0.3, idle) },
+        step("walk to roof edge", 0.4, fwd),
         Step { view: Some((0.0, -0.1)), shot: true, ..step("roof blink targeting", 0.4, MotionInput { blink: true, ..idle }) },
         step("roof blink release", 1.2, idle),
         Step { shot: true, ..step("next roof", 0.2, idle) },

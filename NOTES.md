@@ -709,11 +709,26 @@ factor, and the maximum acceleration is `m_AccelerationRate` times the same fact
 - The engine's own crouch uses `m_fCrouchHeight`. The kit uses it to crawl under gaps too low to sneak through, found
   `m_fAutoCrouchTestDistance` ahead; how the game decides to crouch that low is not traced yet.
 
+### Falling (UE3)
+
+The engine's falling physics, with Corvo's `m_fAirControl` and the attributes above:
+- **Air control** for the frame starts at `m_fAirControl`. If it is above 0.05, a box sweep of the push it would add
+  this frame (horizontal velocity plus `m_AccelerationRate × AirControl` along the input, over the frame) that hits
+  anything sets it to 0 for the frame.
+- **Acceleration**: the input direction times `m_AccelerationRate`, capped at `m_AccelerationRate × AirControl`. Below
+  10 uu/s of horizontal speed (and with some air control) the cap is raised by what it takes to reach 10 this frame. At
+  or above the ground speed, the horizontal speed may not grow past what it was at the start of the frame; with no air
+  control the cap is almost nothing instead.
+- **Each step** (at most 0.05 s): `v += (acceleration + gravity)·Δt`, with the physics volume's gravity, then the move.
+  Landing is on a floor within the walkable limit.
+- **The cap** is the physics volume's `TerminalVelocity`, on the total speed. (The pawn's `MaxFallSpeed` is not a cap;
+  the game uses it to end a slide that falls faster.)
+
 ### Still open for walking
 - The game's sneaking strafe and backward multipliers are only reached in a state the kit doesn't have (sneaking without
   the engine crouch), and the sneak backward one not at all; the kit leaves them out.
 - What sets the walking flag besides a light stick push (a walk key); the kit's walk button walks.
-- Falling still uses the kit's air-control model, not the engine's `PHYS_Falling`.
+- Velocity inside water volumes (their fluid friction) and the water-entry fall fixes.
 
 ## 6. Player motion: where the data lives (2026-10-07)
 
@@ -764,7 +779,7 @@ carrying-corpse variant). The vertical velocity of the base the player stands on
 | Jump velocity | **Follows the game** (attribute `m_JumpZ`) |
 | All speeds, acceleration, air control, gravity, step height, collision sizes, mantle thresholds, slide timing, lean springs, swim | **Game values**, read at runtime |
 | Walking | **Follows the game** (§5h): UE3 walking velocity and braking with Dishonored's gait, top-speed factor, sword factor and blend-down |
-| Falling | The kit's air-control model, not the engine's `PHYS_Falling` |
+| Falling | **Follows the engine** (§5h): air control with its wall test, acceleration caps and terminal velocity |
 | Strafe and backward multipliers | **Follow the game** (§5h): picked by the input's angle |
 | Mantle edge finder, step-up and mantle motion | **Follows the game's behaviour** (§5f): the finder, the step-up and the root-motion climb; the climb's blend-in time is the game's default |
 | Drop assassination: target search, lock-on dive, side, landing place and hold time | **Follows the game's behaviour** (§5b), with tweak values, anchors and timings read at runtime |
@@ -950,7 +965,7 @@ Blink, Agility, the drop and ground assassinations, the sword, tests), `wwise` (
 the game's particle effects, sword fights and drop and ground assassinations on box guards, and `--autopilot` verification routes).
 
 Next:
-1. The engine's falling physics, the lean's collision and forward lean.
+1. The lean's collision and forward lean, and swimming.
 2. The other passive powers' motion effects, if any are wanted (Vitality, Bloodthirsty and Shadow Kill don't change motion).
 3. Drive camera bob and mantle camera motion from the game's camera animations (the Edge decoder now exists).
 4. SubUV flipbooks and original particle material scrolling/distortion; Blink's screen

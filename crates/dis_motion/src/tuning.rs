@@ -17,7 +17,8 @@ pub struct MotionTuning {
     /// Eye height above the cylinder centre when standing.
     pub base_eye_height: f32,
     pub walkable_floor_z: f32,
-    pub max_fall_speed: f32,
+    /// The fastest the player moves while falling (a total speed).
+    pub terminal_velocity: f32,
     pub ladder_speed: f32,
 
     pub run_speed: f32,
@@ -255,7 +256,7 @@ impl MotionTuning {
             max_step_height: p.max_step_height,
             base_eye_height: p.base_eye_height,
             walkable_floor_z: p.walkable_floor_z,
-            max_fall_speed: p.max_fall_speed,
+            terminal_velocity: p.terminal_velocity,
             ladder_speed: p.ladder_speed,
             run_speed: p.ground_speed,
             sprint_speed: p.ground_speed_sprint,

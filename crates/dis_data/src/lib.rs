@@ -50,7 +50,8 @@ pub struct PlayerTuning {
     pub crawl_half_height: f32,
     pub max_step_height: f32,
     pub base_eye_height: f32,
-    pub max_fall_speed: f32,
+    /// The fastest anything falls (`PhysicsVolume.TerminalVelocity`, a total speed).
+    pub terminal_velocity: f32,
     pub ladder_speed: f32,
     pub walkable_floor_z: f32,
     pub ground_friction: f32,
@@ -517,7 +518,7 @@ pub fn load(install: &Path, difficulty: Difficulty) -> Result<GameData, Error> {
         crawl_half_height: cx.f("m_fCrouchHeight", fval(&top, "m_fCrouchHeight").or(pf("CrouchHeight")), 30.0),
         max_step_height: cx.f("MaxStepHeight", pf("MaxStepHeight"), 30.0),
         base_eye_height: cx.f("BaseEyeHeight", pf("BaseEyeHeight"), 60.0),
-        max_fall_speed: cx.f("m_fMaxFallSpeed", ini("DishonoredGame.DishonoredPlayerPawn", "m_fMaxFallSpeed").or(pf("MaxFallSpeed")), 2000.0),
+        terminal_velocity: cx.f("PhysicsVolume TerminalVelocity", fval(&phys_vol, "TerminalVelocity"), 4000.0),
         ladder_speed: cx.f("LadderSpeed", pf("LadderSpeed"), 200.0),
         // The pawn tweak's walkable angle replaces the engine's floor limit.
         walkable_floor_z: cx.f(

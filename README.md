@@ -47,7 +47,7 @@ On Linux the demo runs natively on Wayland with a real pointer lock. Under X11 t
 Distances are in metres; the game works in Unreal units, where 1 uu = 1 cm.
 
 - **Walk, run, sprint, sneak**: the game's own gait rules (`NOTES.md` §5h). The speeds are the `m_GroundSpeed*` attributes from Corvo's release tweak (`Twk_Pawn_Corvo_Release`), per difficulty: he runs at 4 m/s, sprints at 6 m/s and sneaks at 2.75 m/s, all times 0.9 while his sword is in hand (`m_SwordUnsheathedSpeedFactor`), so 3.6, 5.4 and about 2.5 m/s in practice. A light push on a stick walks, a lighter one slow-walks (`DisTweaks_PlayerInput` thresholds). Pushing within 20° of sideways (50° when moving back) is strafing, and within 40° of straight back is backing up: each has its own factor for running and sprinting (`m_GroundStrafeMultiplier*`, `m_GroundBackwardMultiplier*`), so a forward diagonal runs at full speed. Sprint needs a firm push but works in any direction, and ends sneaking. Acceleration is 20 m/s² (`m_AccelerationRate`), scaled by the same factor, with UE3's ground friction of 8 and its braking. When the top speed drops (letting go of sprint, crouching) it blends down at `m_fSpeedBlendDownSpeed` rather than at once.
-- **Jump**: launches at 8 m/s straight up (`m_JumpZ`, the same attribute the game's `StatePlayerMasterJump` reads) under 15 m/s² of gravity (`DefaultGame.ini`). That's a 2.1 m apex. The vertical speed of whatever you stand on is added, as the game does. Air control is 20% (`m_fAirControl`), and it never pushes you past the speed cap.
+- **Jump**: launches at 8 m/s straight up (`m_JumpZ`, the same attribute the game's `StatePlayerMasterJump` reads) under 15 m/s² of gravity (`DefaultGame.ini`). That's a 2.1 m apex. The vertical speed of whatever you stand on is added, as the game does. Air control is the engine's, with Corvo's 20% (`m_fAirControl`): the push is a fifth of the ground acceleration, it switches off for a frame when it would push you into something, and from run speed up it can steer but not add speed (`NOTES.md` §5h).
 - **Fall**: touching down faster than 22.5 m/s reports fall damage (`m_MaxSpeedBeforeFallingDamage`; there's no health, so the HUD logs it). The landing dip and the camera shake scale with how hard you hit.
 - **Crouch (sneak)**: the collision shrinks from 1.75 m tall to 1.3 m (`m_fSneakHeight` on Corvo's tweak), keeping your feet in place. Standing up only happens if there's room.
 - **Crawl**: walk at a gap too low to stand or sneak through and Corvo crouches lower by himself, to 66 cm (`m_fCrouchHeight`, the engine's crouch), then gets back up once the way ahead is clear (`m_fAutoCrouchTestDistance` 1 m).
@@ -146,7 +146,7 @@ The movement needs only the tuning. Everything else is optional and skipped with
 
 **What's still approximate:**
 
-- **Not yet exact**: the lean's wall collision is the kit's own, and falling still uses the kit's model rather than the engine's.
+- **Not yet exact**: the lean's wall collision is the kit's own, and swimming is a simple model.
 - **Camera**: the head bob is procedural. The game drives it from a camera animation (`Ply_Nav_LocoCamera_at`), which the Edge decoder can now read but nothing plays yet.
 - **Effects**: SubUV flipbooks and the original materials' scrolling/distortion graphs aren't done. Mesh particles use cooked LOD 0 geometry, UVs, vertex colours and rotation curves. The particle materials, tattoo brightness and Blink lens shader approximate the look; they do not reconstruct the original shaders. The world camera uses HDR bloom.
 - **Smoke**: the hand smoke is simulated relative to the camera, so it doesn't trail behind you as it does in the game.
@@ -209,6 +209,7 @@ cargo test --workspace
 - settling on the floor and running at run speed;
 - the gait: full speed straight ahead and on the forward diagonal, the strafe factor sideways and on the back diagonal, the backward factor straight back, walking and slow walking on a light push, the sprint's backward factor, and the sword's slowdown;
 - the top speed blending down after a sprint, and braking to a dead stop;
+- air control steering without adding speed past ground speed, and the terminal velocity;
 - the jump apex against ballistics;
 - Agility's power jump: only when jump is held to the top, once, and not without the power; and the other two jump styles;
 - stepping up small ledges and mantling tall ones; the edge finder's step-up for low edges and animation-driven climb (facing the edge) for high ones, refusing walls at a glancing angle, crouching under a low roof, and catching edges only well past them when falling fast;
